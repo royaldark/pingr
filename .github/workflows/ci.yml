@@ -1,0 +1,30 @@
+name: CI
+
+# Only main and PRs: feature-branch pushes get tested via their PR.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      # The loopback tests send real unprivileged pings. Say so explicitly
+      # rather than depending on the runner image's default.
+      - name: Allow unprivileged ICMP
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: rust
+      - run: mise run test

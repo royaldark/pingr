@@ -1,0 +1,42 @@
+[tools]
+# GitHub runners set rustup's profile to minimal, which omits these; name them.
+rust = { version = "1.99.0", components = "rustfmt,clippy" }
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
+"github:bnjbvr/cargo-machete" = "0.9.2"
+typos = "1.50.3"
+
+# Tasks run on Linux, macOS, and Windows: set variables through `env`, never
+# with inline `VAR=value command` shell syntax.
+
+[tasks.build]
+run = "cargo build --workspace --locked"
+
+# Runs pingr straight from the source tree, building it first if needed:
+# `mise run pingr -- stats --last 2h`.
+[tasks.pingr]
+quiet = true
+run = "cargo run --release --locked --quiet -p pingr-cli --"
+
+# Includes the real loopback ICMP test: it must pass, not skip, on every OS.
+[tasks.test]
+run = "cargo test --workspace --locked"
+
+# Only the tests that send real ICMP (to loopback).
+[tasks."test:net"]
+run = "cargo test --locked -p pingr-engine --test loopback"
+
+# Times statistics over a month of one-second samples (about 1 GB, minutes).
+[tasks.bench]
+run = "cargo test --release --locked -p pingr-engine --test bench -- --ignored --nocapture"
+
+# `mise run lint` runs every static check CI runs, in the same order.
+[tasks.lint]
+env = { RUSTDOCFLAGS = "-D warnings" }
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+  "cargo doc --workspace --no-deps --locked",
+  "cargo deny --locked check",
+  "cargo machete",
+  "typos",
+]

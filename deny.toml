@@ -1,0 +1,40 @@
+# cargo-deny: supply-chain checks on the dependency graph.
+# Run with `cargo deny check` (or `mise run lint`).
+
+[graph]
+all-features = true
+# Only the platforms pingr runs on: dependencies of other targets (e.g. wasm)
+# are never built, so they are not ours to vet.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
+]
+
+[advisories]
+# RustSec advisories: vulnerable, unmaintained, or yanked crates fail the check.
+unmaintained = "all"
+yanked = "deny"
+
+[licenses]
+# Permissive licenses only; extend deliberately when a new dependency needs it.
+# Zlib: foldhash, the hasher behind rusqlite's statement cache.
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib"]
+confidence-threshold = 0.9
+
+[licenses.private]
+# Our own crates are `publish = false` and not yet licensed.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies inside the workspace have no version; that's fine.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
