@@ -27,3 +27,11 @@ allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 dbg_macro = "warn"
 todo = "warn"
+
+# Release builds favor a small binary. Measured on the month-long benchmark,
+# optimizing for size costs nothing on reads and a little on bulk writes.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
