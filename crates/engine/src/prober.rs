@@ -70,6 +70,10 @@ pub trait Prober: Send + Sync {
     /// Checks, without sending anything, that this system lets pingr probe.
     fn preflight(&self) -> Result<(), ProbeError>;
 
+    /// Releases whatever is held for probing `addr`, which is no longer a
+    /// target. Probing it again later must still work.
+    fn forget(&self, addr: IpAddr);
+
     /// Probes `addr` once and waits for the answer or the prober's timeout.
     fn probe(&self, addr: IpAddr) -> impl Future<Output = Result<ProbeOutcome, ProbeError>> + Send;
 }

@@ -405,8 +405,15 @@ where
                     .filter(|current| addresses.contains(current))
                     .unwrap_or(addresses[0]);
                 if state.ip != Some(ip) {
-                    state.ip = Some(ip);
+                    let previous = state.ip.replace(ip);
                     self.emit(Event::Resolved { target, ip });
+                    // Over months a name can move through many addresses;
+                    // hold on to none that no target still uses.
+                    if let Some(previous) = previous
+                        && !self.targets.iter().any(|other| other.ip == Some(previous))
+                    {
+                        self.deps.prober.forget(previous);
+                    }
                 }
             }
             Err(error) => {
