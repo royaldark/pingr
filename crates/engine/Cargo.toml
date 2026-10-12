@@ -1,0 +1,17 @@
+[package]
+name = "pingr-engine"
+description = "Ping engine for the pingr network stability tracker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ping-async = "1.0.2"
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tokio = { version = "1.49.0", features = ["macros", "rt"] }
+
+[lints]
+workspace = true

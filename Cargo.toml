@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/engine", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[workspace.dependencies]
+pingr-engine = { path = "crates/engine" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints judged more noise than signal here.
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+# Selected restriction lints: keep debugging leftovers out of main, and make
+# every suppression explain itself via `#[expect(..., reason = "...")]`.
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+todo = "warn"
