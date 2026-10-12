@@ -16,7 +16,7 @@ CREATE TABLE sessions (
   started_us     INTEGER NOT NULL,      -- UTC microseconds since the Unix epoch
   last_alive_us  INTEGER NOT NULL,      -- updated with every write batch
   ended_us       INTEGER,               -- NULL: running, or died uncleanly
-  end_reason     TEXT,                  -- 'stopped' | 'clock-jump'
+  end_reason     TEXT,                  -- 'stopped' | 'clock-jump' | 'stalled'
   interval_us    INTEGER NOT NULL,
   timeout_us     INTEGER NOT NULL,
   pingr_version  TEXT NOT NULL

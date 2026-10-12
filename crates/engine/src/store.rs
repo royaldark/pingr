@@ -130,6 +130,8 @@ impl From<ProbeOutcome> for Outcome {
 /// A probe result on its way into the store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NewSample {
+    /// The collector run that sent the probe.
+    pub session: SessionId,
     /// The target that was probed.
     pub target: TargetId,
     /// Wall-clock time the probe was sent.
@@ -174,6 +176,9 @@ pub enum EndReason {
     /// The wall clock and the monotonic clock diverged (suspend, clock change),
     /// so the run was cut and a new one begun.
     ClockJump,
+    /// The collector went much longer than one interval without probing, so
+    /// the run was cut and a new one begun.
+    Stalled,
 }
 
 impl EndReason {
@@ -181,6 +186,7 @@ impl EndReason {
         match self {
             Self::Stopped => "stopped",
             Self::ClockJump => "clock-jump",
+            Self::Stalled => "stalled",
         }
     }
 
@@ -188,6 +194,7 @@ impl EndReason {
         match text {
             "stopped" => Some(Self::Stopped),
             "clock-jump" => Some(Self::ClockJump),
+            "stalled" => Some(Self::Stalled),
             _ => None,
         }
     }
@@ -274,6 +281,12 @@ impl Store {
         tx.pragma_update(None, "user_version", supported)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Changes how long this handle waits on another process's write before
+    /// reporting the store as busy.
+    pub fn set_busy_timeout(&self, timeout: Duration) -> Result<(), StoreError> {
+        Ok(self.conn.busy_timeout(timeout)?)
     }
 
     /// The schema version of this store.
@@ -590,8 +603,11 @@ impl Collecting {
         Ok(session)
     }
 
-    /// Stores `samples` from `session` and notes that the collector was alive
-    /// at `now`, all or nothing.
+    /// Stores `samples` and notes that the collector, now running `session`,
+    /// was alive at `now`: all or nothing.
+    ///
+    /// Samples may belong to earlier sessions, when their answers arrive after
+    /// a new one has begun.
     pub fn record(
         &mut self,
         session: SessionId,
@@ -613,7 +629,7 @@ impl Collecting {
                 insert.execute(params![
                     sample.target.0,
                     sample.sent.as_micros(),
-                    session.0,
+                    sample.session.0,
                     sample.seq,
                     sample.address.map(|address| address.0),
                     rtt,

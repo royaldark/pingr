@@ -56,8 +56,15 @@ fn collecting(path: &std::path::Path) -> (Collecting, TargetId, SessionId) {
     (collecting, target, session)
 }
 
-fn sample(target: TargetId, sent: i64, seq: u32, outcome: Outcome) -> NewSample {
+fn sample(
+    session: SessionId,
+    target: TargetId,
+    sent: i64,
+    seq: u32,
+    outcome: Outcome,
+) -> NewSample {
     NewSample {
+        session,
         target,
         sent: at(sent),
         seq,
@@ -75,9 +82,9 @@ fn an_unanswered_probe_is_stored_as_lost_not_omitted() {
 
     let answered = NewSample {
         address: Some(address),
-        ..sample(target, 1, 0, REPLY)
+        ..sample(session, target, 1, 0, REPLY)
     };
-    let lost = sample(target, 2, 1, Outcome::Lost(Loss::Timeout));
+    let lost = sample(session, target, 2, 1, Outcome::Lost(Loss::Timeout));
     collecting
         .record(session, at(2), &[answered, lost])
         .expect("record");
@@ -98,7 +105,7 @@ fn a_reader_sees_history_grow_while_the_collector_writes() {
     let (_dir, path) = scratch();
     let (mut collecting, target, session) = collecting(&path);
     collecting
-        .record(session, at(1), &[sample(target, 1, 0, REPLY)])
+        .record(session, at(1), &[sample(session, target, 1, 0, REPLY)])
         .expect("first batch");
 
     let reader = Store::open(&path).expect("reader opens a store in use");
@@ -111,7 +118,7 @@ fn a_reader_sees_history_grow_while_the_collector_writes() {
     );
 
     collecting
-        .record(session, at(2), &[sample(target, 2, 1, REPLY)])
+        .record(session, at(2), &[sample(session, target, 2, 1, REPLY)])
         .expect("second batch, with a reader attached");
     assert_eq!(
         reader
@@ -154,7 +161,7 @@ fn a_time_range_includes_its_start_and_excludes_its_end() {
     let (_dir, path) = scratch();
     let (mut collecting, target, session) = collecting(&path);
     let samples: Vec<_> = (0..5)
-        .map(|second| sample(target, 10 + i64::from(second), second, REPLY))
+        .map(|second| sample(session, target, 10 + i64::from(second), second, REPLY))
         .collect();
     collecting
         .record(session, at(14), &samples)
@@ -184,7 +191,7 @@ fn prune_removes_only_what_is_older_than_the_cutoff_while_collecting_continues()
     let (_dir, path) = scratch();
     let (mut collecting, target, session) = collecting(&path);
     let samples: Vec<_> = (0..4)
-        .map(|second| sample(target, 10 + i64::from(second), second, REPLY))
+        .map(|second| sample(session, target, 10 + i64::from(second), second, REPLY))
         .collect();
     collecting
         .record(session, at(13), &samples)
@@ -195,7 +202,7 @@ fn prune_removes_only_what_is_older_than_the_cutoff_while_collecting_continues()
     assert_eq!(pruner.prune(at(12)).expect("prune"), 2);
 
     collecting
-        .record(session, at(14), &[sample(target, 14, 4, REPLY)])
+        .record(session, at(14), &[sample(session, target, 14, 4, REPLY)])
         .expect("the collector keeps recording after a prune");
     let sent: Vec<_> = pruner
         .samples("example.com", EVERYTHING)
@@ -211,7 +218,7 @@ fn prune_forgets_sessions_that_lie_entirely_before_the_cutoff() {
     let (_dir, path) = scratch();
     let (mut collecting, target, old) = collecting(&path);
     collecting
-        .record(old, at(5), &[sample(target, 5, 0, REPLY)])
+        .record(old, at(5), &[sample(old, target, 5, 0, REPLY)])
         .expect("record");
     collecting
         .end_session(old, at(6), EndReason::Stopped)
@@ -240,7 +247,10 @@ fn a_wall_clock_stepping_backwards_loses_no_samples() {
         .record(
             first,
             at(10),
-            &[sample(target, 10, 0, REPLY), sample(target, 10, 1, REPLY)],
+            &[
+                sample(first, target, 10, 0, REPLY),
+                sample(first, target, 10, 1, REPLY),
+            ],
         )
         .expect("same instant twice in one session");
     // …and a later session lands on that instant again.
@@ -251,7 +261,7 @@ fn a_wall_clock_stepping_backwards_loses_no_samples() {
         .start_session(at(10), SETTINGS, &[target])
         .expect("session");
     collecting
-        .record(second, at(10), &[sample(target, 10, 0, REPLY)])
+        .record(second, at(10), &[sample(second, target, 10, 0, REPLY)])
         .expect("same instant again in a new session");
 
     let stored = collecting
@@ -266,7 +276,7 @@ fn sessions_report_when_the_collector_was_and_was_not_running() {
     let (_dir, path) = scratch();
     let (mut collecting, target, first) = collecting(&path);
     collecting
-        .record(first, at(30), &[sample(target, 30, 0, REPLY)])
+        .record(first, at(30), &[sample(first, target, 30, 0, REPLY)])
         .expect("record");
     // The first run dies without a clean stop; a second starts later.
     let second = collecting
@@ -296,7 +306,7 @@ fn a_fresh_store_is_at_the_current_schema_and_reopens_with_its_data() {
     {
         let (mut collecting, target, session) = collecting(&path);
         collecting
-            .record(session, at(1), &[sample(target, 1, 0, REPLY)])
+            .record(session, at(1), &[sample(session, target, 1, 0, REPLY)])
             .expect("record");
     }
 

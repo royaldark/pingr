@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,11 @@ impl IcmpProber {
 }
 
 impl Prober for IcmpProber {
+    fn preflight(&self) -> Result<(), ProbeError> {
+        // Opening the reply socket is the step a locked-down system refuses.
+        self.requestor(IpAddr::V4(Ipv4Addr::LOCALHOST)).map(drop)
+    }
+
     async fn probe(&self, addr: IpAddr) -> Result<ProbeOutcome, ProbeError> {
         let requestor = self.requestor(addr)?;
         // Timed here rather than taken from the backend, which reports whole

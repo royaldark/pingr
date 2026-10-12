@@ -5,6 +5,7 @@
 //! be replaced without touching the rest of the engine.
 
 pub mod icmp;
+pub mod sim;
 
 use std::future::Future;
 use std::io;
@@ -66,6 +67,9 @@ fn unprivileged_hint() -> &'static str {
 
 /// Sends probes. Implementations must never require elevated privileges.
 pub trait Prober: Send + Sync {
+    /// Checks, without sending anything, that this system lets pingr probe.
+    fn preflight(&self) -> Result<(), ProbeError>;
+
     /// Probes `addr` once and waits for the answer or the prober's timeout.
     fn probe(&self, addr: IpAddr) -> impl Future<Output = Result<ProbeOutcome, ProbeError>> + Send;
 }

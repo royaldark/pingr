@@ -10,10 +10,12 @@ publish.workspace = true
 ping-async = "1.0.2"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 thiserror = "2.0.21"
+tokio = { version = "1.49.0", features = ["macros", "net", "rt", "sync", "time"] }
 
 [dev-dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 tempfile = "3.27.0"
-tokio = { version = "1.49.0", features = ["macros", "rt"] }
+tokio = { version = "1.49.0", features = ["test-util"] }
 
 [lints]
 workspace = true
