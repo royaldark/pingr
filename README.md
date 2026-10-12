@@ -18,6 +18,9 @@ mise run build      # debug build at target/debug/pingr
 cargo install --path crates/cli    # or install `pingr` into ~/.cargo/bin
 ```
 
+To run it without installing anything, use `mise run pingr --` in place of
+`pingr`, e.g. `mise run pingr -- run 1.1.1.1`.
+
 ## Use
 
 Start collecting. This runs until you stop it (Ctrl-C, or `q` in the table

@@ -11,6 +11,12 @@ typos = "1.50.3"
 [tasks.build]
 run = "cargo build --workspace --locked"
 
+# Runs pingr straight from the source tree, building it first if needed:
+# `mise run pingr -- stats --last 2h`.
+[tasks.pingr]
+quiet = true
+run = "cargo run --release --locked --quiet -p pingr-cli --"
+
 # Includes the real loopback ICMP test: it must pass, not skip, on every OS.
 [tasks.test]
 run = "cargo test --workspace --locked"
