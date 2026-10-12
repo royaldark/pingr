@@ -134,14 +134,15 @@ pub fn stats(
     for name in chosen(store, targets)? {
         let samples = store.samples(&name, range)?;
         let stats = summarize(samples.iter().map(|sample| sample.outcome));
-        let gap = uncovered(range, now, &store.sessions(&name, range)?);
-        rows.push((name, stats, gap));
+        let sessions = store.sessions(&name, range)?;
+        let gap = uncovered(range, now, &sessions);
+        rows.push((name, stats, gap, sessions.is_empty()));
     }
 
     if json {
         let rows: Vec<_> = rows
             .into_iter()
-            .map(|(target, stats, gap)| StatsJson {
+            .map(|(target, stats, gap, _)| StatsJson {
                 target,
                 since: fmt::rfc3339(range.since),
                 until: fmt::rfc3339(range.until),
@@ -170,13 +171,13 @@ pub fn stats(
         "target", "sent", "lost", "loss", "min", "mean", "median", "max", "stddev", "p90", "p95",
         "p99", "jitter",
     ]);
-    for (name, stats, _) in &rows {
+    for (name, stats, ..) in &rows {
         table.row(stats_row(name, stats));
     }
     table.print(out)?;
-    for (name, stats, gap) in &rows {
+    for (name, stats, gap, never_ran) in &rows {
         if stats.sent == 0 {
-            writeln!(out, "{name}: no samples in this range.")?;
+            writeln!(out, "{name}: {}", empty(*never_ran))?;
         } else if *gap >= Duration::from_secs(60) {
             writeln!(
                 out,
@@ -186,6 +187,19 @@ pub fn stats(
         }
     }
     Ok(())
+}
+
+/// Why a range holds no samples, as far as the store can tell. `never_ran`
+/// means no collector run on record overlaps the range.
+fn empty(never_ran: bool) -> &'static str {
+    if never_ran {
+        // Pruning removes a run's record along with its samples, so the two
+        // cannot be told apart afterwards.
+        "no samples in this range: the collector was not running then, \
+         or the data has since been pruned."
+    } else {
+        "no samples in this range."
+    }
 }
 
 fn stats_row(name: &str, stats: &Stats) -> Vec<String> {
@@ -258,7 +272,8 @@ pub fn history(
     if samples.is_empty() {
         writeln!(
             out,
-            "{name}: no samples between {} and {}.",
+            "{name}: {} ({} to {})",
+            empty(store.sessions(&name, range)?.is_empty()),
             fmt::datetime(range.since),
             fmt::datetime(range.until)
         )?;

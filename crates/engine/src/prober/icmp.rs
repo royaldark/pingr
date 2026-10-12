@@ -49,6 +49,15 @@ impl Prober for IcmpProber {
         self.requestor(IpAddr::V4(Ipv4Addr::LOCALHOST)).map(drop)
     }
 
+    fn forget(&self, addr: IpAddr) {
+        // Dropping the requestor closes its socket once probes in flight,
+        // which hold their own handle, have finished.
+        self.requestors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&addr);
+    }
+
     async fn probe(&self, addr: IpAddr) -> Result<ProbeOutcome, ProbeError> {
         let requestor = self.requestor(addr)?;
         // Timed here rather than taken from the backend, which reports whole

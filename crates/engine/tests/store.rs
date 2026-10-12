@@ -352,3 +352,48 @@ fn reading_a_store_that_does_not_exist_does_not_create_one() {
     assert!(matches!(Store::open(&path), Err(StoreError::NotFound(_))));
     assert!(!path.exists());
 }
+
+#[test]
+fn a_reader_opens_and_reads_while_another_process_is_mid_write() {
+    let (_dir, path) = scratch();
+    let (mut collecting, target, session) = collecting(&path);
+    collecting
+        .record(session, at(1), &[sample(session, target, 1, 0, REPLY)])
+        .expect("record");
+    // Someone else (a prune, say) is in the middle of a write transaction.
+    let writer = rusqlite::Connection::open(&path).expect("second connection");
+    writer
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("take the write lock");
+
+    let reader = Store::open(&path).expect("opening must not need the write lock");
+    assert_eq!(
+        reader
+            .samples("example.com", EVERYTHING)
+            .expect("read")
+            .len(),
+        1
+    );
+    assert_eq!(reader.targets().expect("targets").len(), 1);
+
+    writer.execute_batch("ROLLBACK").expect("release");
+}
+
+#[test]
+fn a_store_from_an_older_pingr_is_not_read_as_if_current() {
+    let (_dir, path) = scratch();
+    // A database at schema version 0: not yet a pingr store.
+    rusqlite::Connection::open(&path)
+        .expect("raw connection")
+        .execute_batch("CREATE TABLE unrelated (x)")
+        .expect("create");
+
+    let result = Store::open(&path);
+    assert!(matches!(
+        result,
+        Err(StoreError::SchemaTooOld {
+            found: 0,
+            current: 1
+        })
+    ));
+}

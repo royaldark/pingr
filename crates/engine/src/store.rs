@@ -5,6 +5,7 @@
 //! exclusive lock for as long as it runs. Readers open the same file at any
 //! time and see a consistent history while it grows.
 
+use std::cmp::Ordering;
 use std::fs::{self, File, TryLockError};
 use std::io;
 use std::net::IpAddr;
@@ -12,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::types::Type;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::prober::{LossReason, ProbeOutcome};
 use crate::time::{TimeRange, Timestamp, micros};
@@ -20,6 +21,10 @@ use crate::time::{TimeRange, Timestamp, micros};
 /// Schema migrations in order. A store's `user_version` is the number of
 /// entries already applied to it.
 const MIGRATIONS: &[&str] = &[include_str!("store/v1.sql")];
+
+/// The schema version this build reads and writes.
+#[expect(clippy::cast_possible_truncation, reason = "a handful of migrations")]
+const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 
 /// How long a connection waits for another process's write to finish.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -46,6 +51,17 @@ pub enum StoreError {
         found: u32,
         /// The newest version this build knows.
         supported: u32,
+    },
+    /// The store was written by an older pingr and has not been upgraded.
+    #[error(
+        "the store has schema version {found}, older than this pingr's {current}: \
+         start `pingr run` once to upgrade it"
+    )]
+    SchemaTooOld {
+        /// The store's schema version.
+        found: u32,
+        /// The version this build uses.
+        current: u32,
     },
     /// No target with this name has ever been recorded.
     #[error("no data for target `{0}`")]
@@ -235,31 +251,43 @@ pub struct Store {
 }
 
 impl Store {
-    /// Opens the store at `path`, creating it if it does not exist yet and
-    /// bringing an older schema up to date.
+    /// Opens the store at `path` for collecting, creating it if it does not
+    /// exist yet and bringing an older schema up to date.
     pub fn create_or_open(path: &Path) -> Result<Self, StoreError> {
-        let conn = Connection::open(path)?;
-        let mut store = Self::configure(conn, path)?;
+        let mut store = Self::configure(Connection::open(path)?, path)?;
+        // WAL lets readers see a consistent snapshot while the collector
+        // writes. The setting is stored in the file, so only this path, which
+        // may write anyway, needs to make it.
+        store.conn.pragma_update(None, "journal_mode", "WAL")?;
         store.migrate()?;
         Ok(store)
     }
 
-    /// Opens a store that already exists.
+    /// Opens a store that already exists, without writing to it: opening
+    /// succeeds whatever another process is doing to the store at the time.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         if !path.exists() {
             return Err(StoreError::NotFound(path.to_owned()));
         }
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = Connection::open_with_flags(path, flags)?;
-        let mut store = Self::configure(conn, path)?;
-        store.migrate()?;
-        Ok(store)
+        let store = Self::configure(Connection::open_with_flags(path, flags)?, path)?;
+        let found = store.schema_version()?;
+        match found.cmp(&SCHEMA_VERSION) {
+            Ordering::Equal => Ok(store),
+            Ordering::Greater => Err(StoreError::SchemaTooNew {
+                found,
+                supported: SCHEMA_VERSION,
+            }),
+            Ordering::Less => Err(StoreError::SchemaTooOld {
+                found,
+                current: SCHEMA_VERSION,
+            }),
+        }
     }
 
+    /// Connection settings that live in the connection, not in the file.
     fn configure(conn: Connection, path: &Path) -> Result<Self, StoreError> {
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        // WAL lets readers see a consistent snapshot while the collector writes.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", true)?;
         Ok(Self {
@@ -268,17 +296,28 @@ impl Store {
         })
     }
 
+    /// Applies the migrations this store has not seen. Writes nothing when it
+    /// is already current.
     fn migrate(&mut self) -> Result<(), StoreError> {
-        let supported = u32::try_from(MIGRATIONS.len()).unwrap_or(u32::MAX);
-        let tx = self.conn.transaction()?;
+        if self.schema_version()? == SCHEMA_VERSION {
+            return Ok(());
+        }
+        // Take the write lock first, then look again: another process may
+        // have migrated in the meantime.
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let found: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if found > supported {
-            return Err(StoreError::SchemaTooNew { found, supported });
+        if found > SCHEMA_VERSION {
+            return Err(StoreError::SchemaTooNew {
+                found,
+                supported: SCHEMA_VERSION,
+            });
         }
         for migration in MIGRATIONS.iter().skip(found as usize) {
             tx.execute_batch(migration)?;
         }
-        tx.pragma_update(None, "user_version", supported)?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(())
     }

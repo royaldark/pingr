@@ -24,6 +24,7 @@ pub struct SimProber<F> {
     permitted: bool,
     behave: F,
     sent: Mutex<HashMap<IpAddr, u64>>,
+    forgotten: Mutex<Vec<IpAddr>>,
 }
 
 impl<F> SimProber<F>
@@ -38,7 +39,16 @@ where
             permitted: true,
             behave,
             sent: Mutex::new(HashMap::new()),
+            forgotten: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The addresses the collector has said it no longer probes, in order.
+    pub fn forgotten(&self) -> Vec<IpAddr> {
+        self.forgotten
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// The same prober on a system that refuses unprivileged pings.
@@ -61,6 +71,13 @@ where
                 io::ErrorKind::PermissionDenied,
             )))
         }
+    }
+
+    fn forget(&self, addr: IpAddr) {
+        self.forgotten
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(addr);
     }
 
     async fn probe(&self, addr: IpAddr) -> Result<ProbeOutcome, ProbeError> {

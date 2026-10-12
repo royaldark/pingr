@@ -272,3 +272,38 @@ fn without_a_terminal_the_default_output_is_periodic_summaries() {
     );
     assert!(text.contains("sent, "), "no closing totals:\n{text}");
 }
+
+#[test]
+fn a_range_before_any_collection_says_the_collector_was_not_running() {
+    let (_dir, db) = seeded();
+
+    let output = pingr(
+        &db,
+        &["stats", "--since", "2020-01-01", "--until", "2020-01-02"],
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("the collector was not running then"),
+        "{text}"
+    );
+
+    let output = pingr(
+        &db,
+        &[
+            "history",
+            "example.com",
+            "--since",
+            "2020-01-01",
+            "--until",
+            "2020-01-02",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("the collector was not running then"),
+        "{text}"
+    );
+}

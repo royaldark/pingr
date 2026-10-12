@@ -433,3 +433,58 @@ async fn samples_taken_while_the_store_is_busy_are_kept_and_written_later() {
         "probing stopped while the store was busy: {seqs:?}"
     );
 }
+
+/// A name that resolves to one address at first and another ever after.
+struct Moving {
+    lookups: std::sync::atomic::AtomicUsize,
+    first: IpAddr,
+    then: IpAddr,
+}
+
+impl Resolver for Moving {
+    fn resolve(&self, _: &str) -> impl Future<Output = io::Result<Vec<IpAddr>>> + Send {
+        let nth = self.lookups.fetch_add(1, Ordering::SeqCst);
+        std::future::ready(Ok(vec![if nth == 0 { self.first } else { self.then }]))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn when_a_name_moves_the_new_address_is_probed_and_the_old_one_released() {
+    let harness = Harness::new();
+    let (old, new) = (ip("192.0.2.10"), ip("192.0.2.20"));
+    let prober = Arc::new(prompt(2 * SECOND));
+    let deps = Deps {
+        prober: Arc::clone(&prober),
+        resolver: Arc::new(Moving {
+            lookups: std::sync::atomic::AtomicUsize::new(0),
+            first: old,
+            then: new,
+        }),
+        wall: Arc::clone(&harness.clock),
+    };
+    let store = Store::create_or_open(&harness.path)
+        .expect("create store")
+        .collect()
+        .expect("claim store");
+    let (events, _seen) = broadcast::channel(4096);
+
+    // Names are looked up again every five minutes; run just past that.
+    run(
+        Config::new(vec!["moving.test".to_owned()]),
+        deps,
+        store,
+        events,
+        tokio::time::sleep(Duration::from_millis(302_500)),
+    )
+    .await
+    .expect("clean stop");
+
+    let samples = harness.samples("moving.test");
+    assert_eq!(samples.first().and_then(|sample| sample.address), Some(old));
+    let at_new = samples
+        .iter()
+        .filter(|sample| sample.address == Some(new))
+        .count();
+    assert_eq!(at_new, 2, "probes at 301 s and 302 s go to the new address");
+    assert_eq!(prober.forgotten(), [old]);
+}
