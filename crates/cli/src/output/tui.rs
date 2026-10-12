@@ -284,11 +284,11 @@ mod tests {
         };
         assert_eq!(
             row("steady.test"),
-            "steady.test 192.0.2.9 20.0 ms 0% 20.0 ms 20.0 ms 20.0 ms 4 0"
+            "steady.test 192.0.2.9 20.0 ms 0.0% 20.0 ms 20.0 ms 20.0 ms 4 0"
         );
         assert_eq!(
             row("flaky.test"),
-            "flaky.test - lost (timeout) 50% 20.0 ms 20.0 ms 20.0 ms 2 1"
+            "flaky.test - lost (timeout) 50.0% 20.0 ms 20.0 ms 20.0 ms 2 1"
         );
         assert!(
             screen

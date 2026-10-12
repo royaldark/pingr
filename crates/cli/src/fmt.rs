@@ -51,14 +51,9 @@ pub fn rtt(duration: Duration) -> String {
     }
 }
 
-/// A fraction as a percentage, e.g. `0.25%`.
+/// A fraction as a percentage to one decimal place, e.g. `0.3%`.
 pub fn percent(fraction: f64) -> String {
-    let percent = fraction * 100.0;
-    if percent == 0.0 || percent >= 10.0 {
-        format!("{percent:.0}%")
-    } else {
-        format!("{percent:.2}%")
-    }
+    format!("{:.1}%", fraction * 100.0)
 }
 
 /// A long duration in its two largest units, e.g. `3h 12m`.
