@@ -19,6 +19,10 @@ run = "cargo test --workspace --locked"
 [tasks."test:net"]
 run = "cargo test --locked -p pingr-engine --test loopback"
 
+# Times statistics over a month of one-second samples (about 1 GB, minutes).
+[tasks.bench]
+run = "cargo test --release --locked -p pingr-engine --test bench -- --ignored --nocapture"
+
 # `mise run lint` runs every static check CI runs, in the same order.
 [tasks.lint]
 env = { RUSTDOCFLAGS = "-D warnings" }
