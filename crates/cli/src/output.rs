@@ -5,6 +5,7 @@
 
 pub mod ping;
 pub mod summary;
+pub mod tui;
 
 use std::io::{self, Write};
 use std::net::IpAddr;
@@ -33,6 +34,11 @@ pub trait Display {
 
     /// Called once per reporting period.
     fn report(&mut self, out: &mut dyn Write) -> io::Result<()>;
+
+    /// Called several times a second, for modes that repaint a screen.
+    fn redraw(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A target as the output modes know it.

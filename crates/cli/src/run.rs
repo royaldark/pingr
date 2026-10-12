@@ -13,11 +13,12 @@ use pingr_engine::resolve::SystemResolver;
 use pingr_engine::store::Store;
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::chain;
 use crate::output::ping::Ping;
 use crate::output::summary::Summary;
+use crate::output::tui::Tui;
 use crate::output::{Display, Mode, Target, Totals};
 use crate::when::Span;
 
@@ -94,6 +95,14 @@ fn settings(args: &RunArgs) -> Result<Config, String> {
     Ok(config)
 }
 
+/// Waits for the quit key in modes that have one; never completes otherwise.
+async fn quit_requested(quit_key: &mut Option<mpsc::Receiver<()>>) -> Option<()> {
+    match quit_key {
+        Some(quit_key) => quit_key.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 fn collect_error(error: &CollectError) -> String {
     chain(error)
 }
@@ -149,20 +158,26 @@ async fn collect(
     };
 
     let mut out = io::stdout();
-    let mut display: Box<dyn Display> = match mode {
-        Mode::Summary => Box::new(Summary::new(targets.clone())),
-        Mode::Ping => Box::new(Ping::new(targets.clone())),
-        Mode::Tui => return Err("the terminal view is not available in this build".to_owned()),
-    };
     let io_error = |error: io::Error| chain(&error);
-    writeln!(
-        out,
+    let heading = format!(
         "pingr: probing {} every {:?}, recording to {}",
         config.targets.join(", "),
         config.interval,
         db.display()
-    )
-    .map_err(io_error)?;
+    );
+    let mut quit_key = None;
+    let mut display: Box<dyn Display> = match mode {
+        Mode::Summary => Box::new(Summary::new(targets.clone())),
+        Mode::Ping => Box::new(Ping::new(targets.clone())),
+        Mode::Tui => {
+            let (tui, quit) = Tui::start(heading.clone(), targets.clone());
+            quit_key = Some(quit);
+            Box::new(tui)
+        }
+    };
+    if mode != Mode::Tui {
+        writeln!(out, "{heading}").map_err(io_error)?;
+    }
 
     let (events, mut seen) = broadcast::channel(1024);
     let (stop, stopped) = oneshot::channel::<()>();
@@ -175,6 +190,7 @@ async fn collect(
     let mut totals = vec![Totals::default(); targets.len()];
     let mut report = tokio::time::interval(args.report_every.0.max(Duration::from_millis(100)));
     report.tick().await;
+    let mut redraw = tokio::time::interval(Duration::from_millis(200));
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
 
@@ -184,6 +200,10 @@ async fn collect(
             _ = &mut interrupt, if stop.is_some() => {
                 stop.take();
             }
+            Some(()) = quit_requested(&mut quit_key), if stop.is_some() => {
+                stop.take();
+            }
+            _ = redraw.tick() => display.redraw().map_err(io_error)?,
             _ = report.tick() => display.report(&mut out).map_err(io_error)?,
             event = seen.recv() => match event {
                 Ok(event) => {
@@ -214,6 +234,8 @@ async fn collect(
         }
         display.event(&event, &mut out).map_err(io_error)?;
     }
+    // Hands the screen back before anything more is printed.
+    drop(display);
     writeln!(out).map_err(io_error)?;
     for (target, total) in targets.iter().zip(&totals) {
         writeln!(out, "{}", total.line(&target.name)).map_err(io_error)?;
