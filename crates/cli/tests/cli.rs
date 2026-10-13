@@ -216,6 +216,41 @@ fn the_terminal_view_refuses_to_run_without_a_terminal() {
     );
 }
 
+#[test]
+fn without_a_command_the_arguments_are_those_of_run() {
+    let (_dir, db) = scratch();
+
+    let output = pingr(
+        &db,
+        &[
+            "127.0.0.1",
+            "--output",
+            "ping",
+            "--interval",
+            "50ms",
+            "--count",
+            "1",
+        ],
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("seq="), "{}", stdout(&output));
+}
+
+#[test]
+fn collecting_options_ahead_of_another_command_are_rejected() {
+    let (_dir, db) = seeded();
+
+    let output = pingr(&db, &["--count", "3", "status"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("cannot come before `status`"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 /// Real pings to loopback, as in the engine's loopback test.
 #[test]
 fn ping_output_prints_a_line_per_probe() {
