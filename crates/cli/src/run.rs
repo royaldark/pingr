@@ -78,7 +78,7 @@ fn settings(args: &RunArgs) -> Result<Config, String> {
     }
     if targets.is_empty() {
         return Err(
-            "nothing to probe: name at least one target, e.g. `pingr run 1.1.1.1 example.com`"
+            "nothing to probe: name at least one target, e.g. `pingr 1.1.1.1 example.com`"
                 .to_owned(),
         );
     }

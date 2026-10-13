@@ -13,7 +13,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::SystemTime;
 
-use clap::{Parser, Subcommand};
+use clap::error::ErrorKind;
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use pingr_engine::store::{Store, StoreError};
 use pingr_engine::time::Timestamp;
 
@@ -23,18 +25,27 @@ use when::{RangeArgs, When};
 /// Track network stability: ping targets around the clock, then ask how the
 /// connection has been.
 #[derive(Debug, Parser)]
-#[command(version, about, max_term_width = 100)]
+#[command(
+    name = "pingr",
+    version,
+    about,
+    max_term_width = 100,
+    arg_required_else_help = true
+)]
 struct Cli {
     /// Where the data lives [default: pingr/pingr.db in your user data directory]
     #[arg(long, global = true, env = "PINGR_DB", value_name = "FILE")]
     db: Option<PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    /// With no command, the arguments are those of `run`.
+    #[command(flatten)]
+    run: run::RunArgs,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Probe targets and record the results until interrupted
+    /// Probe targets and record the results until interrupted (the default)
     Run(run::RunArgs),
     /// Loss and latency statistics per target over a time range
     Stats {
@@ -104,8 +115,29 @@ fn default_db() -> Result<PathBuf, String> {
         })
 }
 
+/// Parses the command line, refusing `run`'s arguments ahead of another
+/// command: clap's own `args_conflicts_with_subcommands` would also stop
+/// `--db` from coming before a command.
+fn parse() -> Cli {
+    let matches = Cli::command().get_matches();
+    let given = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
+    let stray = matches
+        .ids()
+        .map(clap::Id::as_str)
+        .any(|id| id != "db" && given(id));
+    if let (Some((name, _)), true) = (matches.subcommand(), stray) {
+        Cli::command()
+            .error(
+                ErrorKind::ArgumentConflict,
+                format!("targets and collecting options cannot come before `{name}`"),
+            )
+            .exit();
+    }
+    Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = parse();
     match dispatch(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
@@ -144,7 +176,7 @@ fn dispatch(cli: Cli) -> Result<(), String> {
     let open = || Store::open(&db).map_err(|error: StoreError| chain(&error));
     let mut out = io::stdout().lock();
 
-    match cli.command {
+    match cli.command.unwrap_or(Command::Run(cli.run)) {
         Command::Run(args) => run::run(&db, &args),
         Command::Stats {
             targets,

@@ -19,7 +19,7 @@ cargo install --path crates/cli    # or install `pingr` into ~/.cargo/bin
 ```
 
 To run it without installing anything, use `mise run pingr --` in place of
-`pingr`, e.g. `mise run pingr -- run 1.1.1.1`.
+`pingr`, e.g. `mise run pingr -- 1.1.1.1`.
 
 ## Use
 
@@ -27,8 +27,11 @@ Start collecting. This runs until you stop it (Ctrl-C, or `q` in the table
 view):
 
 ```
-pingr run 1.1.1.1 example.com
+pingr 1.1.1.1 example.com
 ```
+
+`pingr run 1.1.1.1 example.com` is the same thing spelled out; use it for a
+target that shares a name with a command.
 
 In a terminal this shows a live table. Elsewhere (piped, under a service
 manager) it prints a summary line per target every minute and a line whenever
