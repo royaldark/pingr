@@ -3,6 +3,7 @@
 //! Every mode is fed the same stream of collector events and computes nothing
 //! the others could not.
 
+pub mod health;
 pub mod ping;
 pub mod summary;
 pub mod tui;
@@ -15,6 +16,9 @@ use pingr_engine::collector::Event;
 use pingr_engine::store::{EndReason, Outcome};
 
 use crate::fmt;
+
+/// Consecutive losses after which a target counts as not answering.
+pub const DOWN_AFTER: u32 = 3;
 
 /// How `pingr run` reports what it is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

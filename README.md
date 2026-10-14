@@ -69,6 +69,13 @@ timeout = "2s"
 - **jitter** is the mean difference between one answer and the next.
 - **stddev** is the population standard deviation.
 
+In the live table, each target's row is colored by its latest 60 probes:
+green when loss is at most 2%, p95 at most 100 ms, and jitter at most 10 ms;
+yellow within 5%, 250 ms, and 30 ms; red beyond that, or as soon as three
+probes in a row go unanswered. A lone slow or lost probe does not change the
+color, and a target that recovers turns green only once its trouble has left
+the window.
+
 ## Things to know
 
 **Privileges.** pingr uses each system's unprivileged ping mechanism. On Linux

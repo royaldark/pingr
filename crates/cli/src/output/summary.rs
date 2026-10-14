@@ -9,11 +9,8 @@ use pingr_engine::stats::summarize;
 use pingr_engine::store::Outcome;
 use pingr_engine::time::Timestamp;
 
-use super::{Display, Target, notice};
+use super::{DOWN_AFTER, Display, Target, notice};
 use crate::fmt;
-
-/// Consecutive losses after which a target is reported as not answering.
-const DOWN_AFTER: u32 = 3;
 
 #[derive(Default)]
 struct Recent {
@@ -83,10 +80,14 @@ impl Display for Summary {
             let stats = summarize(recent.window.drain(..));
             let timings = stats.rtt.map_or_else(String::new, |rtt| {
                 format!(
-                    ", mean {}, p95 {}, max {}",
+                    ", mean {}, p95 {}, max {}{}",
                     fmt::rtt(rtt.mean),
                     fmt::rtt(rtt.p95),
-                    fmt::rtt(rtt.max)
+                    fmt::rtt(rtt.max),
+                    rtt.jitter.map_or_else(String::new, |jitter| format!(
+                        ", jitter {}",
+                        fmt::rtt(jitter)
+                    ))
                 )
             });
             writeln!(

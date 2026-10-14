@@ -13,21 +13,56 @@ use pingr_engine::stats::summarize;
 use pingr_engine::store::Outcome;
 use ratatui::crossterm::event::{self, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc;
 
-use super::{Display, Target, Totals, notice};
+use super::health::{self, Health, Limits};
+use super::{DOWN_AFTER, Display, Target, Totals, notice};
 use crate::fmt;
 
-/// How many of the latest probes the "recent" columns cover.
+/// How many of the latest probes the "recent" columns and the row's color
+/// cover.
 const RECENT: usize = 60;
 
 struct TargetLine {
     recent: VecDeque<Outcome>,
+    losses_in_a_row: u32,
     totals: Totals,
+}
+
+fn color(health: Health) -> Color {
+    match health {
+        Health::Good => Color::Green,
+        Health::Fair => Color::Yellow,
+        Health::Poor => Color::Red,
+    }
+}
+
+/// What the colors mean, e.g. `good ≤ 2% loss, 100 ms p95, 10 ms jitter`.
+fn legend() -> Line<'static> {
+    let limits = |limits: &Limits| {
+        (
+            format!("{}%", limits.loss * 100.0),
+            format!("{} ms", limits.p95.as_millis()),
+            format!("{} ms", limits.jitter.as_millis()),
+        )
+    };
+    let (loss, p95, jitter) = limits(&health::GOOD);
+    let good = format!(" ≤ {loss} loss, {p95} p95, {jitter} jitter   ");
+    let (loss, p95, jitter) = limits(&health::FAIR);
+    let fair = format!(" ≤ {loss}, {p95}, {jitter}   ");
+    let grade = |name: &'static str, health| Span::styled(name, Style::new().fg(color(health)));
+    Line::from(vec![
+        grade("good", Health::Good),
+        Span::raw(good),
+        grade("fair", Health::Fair),
+        Span::raw(fair),
+        grade("poor", Health::Poor),
+        Span::raw(format!(" worse, or {DOWN_AFTER} lost in a row")),
+    ])
 }
 
 /// What the table shows: everything the screen is drawn from.
@@ -45,6 +80,7 @@ impl View {
             .iter()
             .map(|_| TargetLine {
                 recent: VecDeque::with_capacity(RECENT),
+                losses_in_a_row: 0,
                 totals: Totals::default(),
             })
             .collect();
@@ -70,6 +106,10 @@ impl View {
                 line.recent.pop_front();
             }
             line.recent.push_back(*outcome);
+            line.losses_in_a_row = match outcome {
+                Outcome::Lost(_) => line.losses_in_a_row + 1,
+                Outcome::Reply { .. } => 0,
+            };
             line.totals.add(*outcome);
         }
     }
@@ -78,12 +118,15 @@ impl View {
         let dash = || "-".to_owned();
         let rows = self.targets.iter().zip(&self.lines).map(|(target, line)| {
             let recent = summarize(line.recent.iter().copied());
-            let timing = |pick: fn(&pingr_engine::stats::RttStats) -> Duration| {
+            let timing = |pick: fn(&pingr_engine::stats::RttStats) -> Option<Duration>| {
                 recent
                     .rtt
                     .as_ref()
-                    .map_or_else(dash, |rtt| fmt::rtt(pick(rtt)))
+                    .and_then(pick)
+                    .map_or_else(dash, fmt::rtt)
             };
+            let style = Health::judge(&recent, line.losses_in_a_row)
+                .map_or_else(Style::new, |health| Style::new().fg(color(health)));
             Row::new([
                 Cell::from(target.name.clone()),
                 Cell::from(target.ip.map_or_else(dash, |ip| ip.to_string())),
@@ -93,12 +136,14 @@ impl View {
                         .map_or_else(dash, |last| fmt::outcome(*last)),
                 ),
                 Cell::from(recent.loss().map_or_else(dash, fmt::percent)),
-                Cell::from(timing(|rtt| rtt.mean)),
-                Cell::from(timing(|rtt| rtt.p95)),
-                Cell::from(timing(|rtt| rtt.max)),
+                Cell::from(timing(|rtt| Some(rtt.mean))),
+                Cell::from(timing(|rtt| Some(rtt.p95))),
+                Cell::from(timing(|rtt| Some(rtt.max))),
+                Cell::from(timing(|rtt| rtt.jitter)),
                 Cell::from(line.totals.sent.to_string()),
                 Cell::from((line.totals.sent - line.totals.received).to_string()),
             ])
+            .style(style)
         });
         let widths = [
             Constraint::Fill(2),
@@ -109,15 +154,16 @@ impl View {
             Constraint::Length(9),
             Constraint::Length(9),
             Constraint::Length(9),
+            Constraint::Length(9),
             Constraint::Length(7),
         ];
         let header = Row::new([
-            "target", "address", "last", "loss", "mean", "p95", "max", "sent", "lost",
+            "target", "address", "last", "loss", "mean", "p95", "max", "jitter", "sent", "lost",
         ])
         .style(Style::new().add_modifier(Modifier::BOLD));
 
         let [top, body, bottom] = Layout::vertical([
-            Constraint::Length(2),
+            Constraint::Length(3),
             Constraint::Fill(1),
             Constraint::Length(2),
         ])
@@ -126,12 +172,14 @@ impl View {
             vec![
                 Line::from(self.heading.as_str()),
                 Line::from(format!(
-                    "loss, mean, p95, max: latest {RECENT} probes   sent, lost: this run"
+                    "loss, mean, p95, max, jitter, color: latest {RECENT} probes   \
+                     sent, lost: this run"
                 ))
                 .style(Style::new().add_modifier(Modifier::DIM)),
+                legend(),
             ]
             .into_iter()
-            .collect::<ratatui::text::Text>(),
+            .collect::<Text>(),
             top,
         );
         frame.render_widget(Table::new(rows, widths).header(header), body);
@@ -141,7 +189,7 @@ impl View {
                 Line::from("q to stop").style(Style::new().add_modifier(Modifier::DIM)),
             ]
             .into_iter()
-            .collect::<ratatui::text::Text>(),
+            .collect::<Text>(),
             bottom,
         );
     }
@@ -240,10 +288,15 @@ mod tests {
         }
     }
 
+    fn draw(view: &View) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(120, 10)).expect("test terminal");
+        terminal.draw(|frame| view.draw(frame)).expect("draw");
+        terminal
+    }
+
     /// The screen as text, one string per row.
     fn screen(view: &View) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(110, 8)).expect("test terminal");
-        terminal.draw(|frame| view.draw(frame)).expect("draw");
+        let terminal = draw(view);
         let buffer = terminal.backend().buffer();
         (0..buffer.area.height)
             .map(|y| {
@@ -284,11 +337,11 @@ mod tests {
         };
         assert_eq!(
             row("steady.test"),
-            "steady.test 192.0.2.9 20.0 ms 0.0% 20.0 ms 20.0 ms 20.0 ms 4 0"
+            "steady.test 192.0.2.9 20.0 ms 0.0% 20.0 ms 20.0 ms 20.0 ms 0.00 ms 4 0"
         );
         assert_eq!(
             row("flaky.test"),
-            "flaky.test - lost (timeout) 50.0% 20.0 ms 20.0 ms 20.0 ms 2 1"
+            "flaky.test - lost (timeout) 50.0% 20.0 ms 20.0 ms 20.0 ms - 2 1"
         );
         assert!(
             screen
@@ -297,5 +350,37 @@ mod tests {
             "the address change is not announced:\n{}",
             screen.join("\n")
         );
+    }
+
+    #[test]
+    fn each_row_is_colored_by_its_health_over_the_recent_probes() {
+        let targets = ["up.test", "down.test", "waiting.test"].map(|name| Target {
+            name: name.to_owned(),
+            ip: None,
+        });
+        let mut view = View::new("pingr".to_owned(), targets.to_vec());
+        let reply = Outcome::Reply {
+            rtt: Duration::from_millis(20),
+        };
+        for seq in 0..10 {
+            view.apply(&probe(0, seq, reply));
+            view.apply(&probe(1, seq, reply));
+        }
+        for seq in 10..13 {
+            view.apply(&probe(1, seq, Outcome::Lost(Loss::Timeout)));
+        }
+
+        let terminal = draw(&view);
+        let buffer = terminal.backend().buffer();
+        let color_of = |name: &str| {
+            let y = screen(&view)
+                .iter()
+                .position(|line| line.starts_with(name))
+                .unwrap_or_else(|| panic!("no row for {name}"));
+            buffer[(0, u16::try_from(y).expect("a short screen"))].fg
+        };
+        assert_eq!(color_of("up.test"), Color::Green);
+        assert_eq!(color_of("down.test"), Color::Red);
+        assert_eq!(color_of("waiting.test"), Color::Reset);
     }
 }
