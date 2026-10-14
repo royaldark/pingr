@@ -8,6 +8,13 @@ and jitter.
 It runs on Linux, macOS, and Windows, and never needs root or administrator
 rights.
 
+## Install
+
+Download the archive for your system from the
+[releases page](https://github.com/royaldark/pingr/releases), unpack it, and
+put `pingr` (`pingr.exe` on Windows) somewhere on your `PATH`. Each archive
+has a `.sha256` file beside it to check the download against.
+
 ## Build
 
 Tooling is managed by [mise](https://mise.jdx.dev):
