@@ -30,7 +30,7 @@ fn stats_over_thirty_days_of_one_second_samples() {
     };
     let start = Timestamp::from_micros(1_700_000_000_000_000);
     let session = collecting
-        .start_session(start, settings, &targets)
+        .start_session(start, settings, None, &targets)
         .expect("session");
 
     let began = Instant::now();

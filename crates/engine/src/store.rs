@@ -15,12 +15,13 @@ use std::time::Duration;
 use rusqlite::types::Type;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior, params};
 
+use crate::network::SessionNetwork;
 use crate::prober::{LossReason, ProbeOutcome};
 use crate::time::{TimeRange, Timestamp, micros};
 
 /// Schema migrations in order. A store's `user_version` is the number of
 /// entries already applied to it.
-const MIGRATIONS: &[&str] = &[include_str!("store/v1.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("store/v1.sql"), include_str!("store/v2.sql")];
 
 /// The schema version this build reads and writes.
 #[expect(clippy::cast_possible_truncation, reason = "a handful of migrations")]
@@ -66,6 +67,12 @@ pub enum StoreError {
     /// No target with this name has ever been recorded.
     #[error("no data for target `{0}`")]
     UnknownTarget(String),
+    /// No network has this label.
+    #[error("no network labeled `{0}`")]
+    UnknownNetwork(String),
+    /// Another network already has this label.
+    #[error("another network is already labeled `{0}`")]
+    LabelTaken(String),
     /// The database rejected an operation.
     #[error("store error")]
     Sqlite(#[from] rusqlite::Error),
@@ -85,6 +92,10 @@ pub struct AddressId(i64);
 /// Identifies one uninterrupted collector run within one store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId(i64);
+
+/// Identifies a network within one store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NetworkId(i64);
 
 /// What became of one probe, as stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +178,8 @@ pub struct Sample {
     pub sent: Timestamp,
     /// The collector run that sent it.
     pub session: SessionId,
+    /// The network that run was on, if it could be told.
+    pub network: Option<NetworkId>,
     /// The probe's position in its session, per target, counting from zero.
     pub seq: u32,
     /// The address probed, or `None` if the name did not resolve.
@@ -195,6 +208,9 @@ pub enum EndReason {
     /// The collector went much longer than one interval without probing, so
     /// the run was cut and a new one begun.
     Stalled,
+    /// The machine moved to another network, so the run was cut and a new one
+    /// begun.
+    NetworkChanged,
 }
 
 impl EndReason {
@@ -203,6 +219,7 @@ impl EndReason {
             Self::Stopped => "stopped",
             Self::ClockJump => "clock-jump",
             Self::Stalled => "stalled",
+            Self::NetworkChanged => "network-change",
         }
     }
 
@@ -211,6 +228,7 @@ impl EndReason {
             "stopped" => Some(Self::Stopped),
             "clock-jump" => Some(Self::ClockJump),
             "stalled" => Some(Self::Stalled),
+            "network-change" => Some(Self::NetworkChanged),
             _ => None,
         }
     }
@@ -224,6 +242,8 @@ impl EndReason {
 pub struct Session {
     /// The session's identity.
     pub id: SessionId,
+    /// The network it ran on, if it could be told.
+    pub network: Option<NetworkId>,
     /// When collection began.
     pub started: Timestamp,
     /// The last moment the collector is known to have been recording.
@@ -241,6 +261,21 @@ pub struct TargetSummary {
     /// Send time of its oldest stored sample, if it has any.
     pub first: Option<Timestamp>,
     /// Send time of its newest stored sample, if it has any.
+    pub last: Option<Timestamp>,
+}
+
+/// A network known to the store and the span its sessions cover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkSummary {
+    /// The network's identity.
+    pub id: NetworkId,
+    /// What the user calls it.
+    pub label: String,
+    /// The default gateway's hardware address, if it was ever detected.
+    pub gateway_mac: Option<String>,
+    /// When the collector first ran on it, if any run on it is still stored.
+    pub first: Option<Timestamp>,
+    /// When the collector last ran on it.
     pub last: Option<Timestamp>,
 }
 
@@ -421,12 +456,64 @@ impl Store {
             .ok_or_else(|| StoreError::UnknownTarget(name.to_owned()))
     }
 
+    /// Every network the collector has run on, or been told it is on, by
+    /// label.
+    pub fn networks(&self) -> Result<Vec<NetworkSummary>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT n.id, n.label, n.gateway_mac,
+                    min(s.started_us), max(coalesce(s.ended_us, s.last_alive_us))
+             FROM networks n LEFT JOIN sessions s ON s.network_id = n.id
+             GROUP BY n.id ORDER BY n.label",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(NetworkSummary {
+                id: NetworkId(row.get(0)?),
+                label: row.get(1)?,
+                gateway_mac: row.get(2)?,
+                first: row.get::<_, Option<i64>>(3)?.map(Timestamp::from_micros),
+                last: row.get::<_, Option<i64>>(4)?.map(Timestamp::from_micros),
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The network labeled `label`.
+    pub fn network_by_label(&self, label: &str) -> Result<NetworkId, StoreError> {
+        self.conn
+            .query_row("SELECT id FROM networks WHERE label = ?1", [label], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .map(NetworkId)
+            .ok_or_else(|| StoreError::UnknownNetwork(label.to_owned()))
+    }
+
+    /// Gives the network labeled `label` the label `new` instead.
+    ///
+    /// Safe to run while a collector is recording.
+    pub fn rename_network(&self, label: &str, new: &str) -> Result<(), StoreError> {
+        let network = self.network_by_label(label)?;
+        match self.conn.execute(
+            "UPDATE networks SET label = ?2 WHERE id = ?1",
+            params![network.0, new],
+        ) {
+            Ok(_) => Ok(()),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(StoreError::LabelTaken(new.to_owned()))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// The samples sent to `target` within `range`, oldest first.
     pub fn samples(&self, target: &str, range: TimeRange) -> Result<Vec<Sample>, StoreError> {
         let target = self.known_target(target)?;
         let mut statement = self.conn.prepare_cached(
-            "SELECT s.sent_us, s.session_id, s.seq, a.ip, s.rtt_us, s.loss
+            "SELECT s.sent_us, s.session_id, s.seq, a.ip, s.rtt_us, s.loss, n.network_id
              FROM samples s LEFT JOIN addresses a ON a.id = s.address_id
+               JOIN sessions n ON n.id = s.session_id
              WHERE s.target_id = ?1 AND s.sent_us >= ?2 AND s.sent_us < ?3
              ORDER BY s.sent_us, s.session_id, s.seq",
         )?;
@@ -442,7 +529,7 @@ impl Store {
     pub fn sessions(&self, target: &str, range: TimeRange) -> Result<Vec<Session>, StoreError> {
         let target = self.known_target(target)?;
         let mut statement = self.conn.prepare_cached(
-            "SELECT s.id, s.started_us, s.last_alive_us, s.ended_us, s.end_reason
+            "SELECT s.id, s.started_us, s.last_alive_us, s.ended_us, s.end_reason, s.network_id
              FROM sessions s JOIN session_targets st ON st.session_id = s.id
              WHERE st.target_id = ?1
                AND s.started_us < ?3
@@ -546,6 +633,7 @@ fn read_sample(row: &Row<'_>) -> rusqlite::Result<Sample> {
     Ok(Sample {
         sent: Timestamp::from_micros(row.get(0)?),
         session: SessionId(row.get(1)?),
+        network: row.get::<_, Option<i64>>(6)?.map(NetworkId),
         seq: row.get(2)?,
         address,
         outcome,
@@ -566,10 +654,29 @@ fn read_session(row: &Row<'_>) -> rusqlite::Result<Session> {
     };
     Ok(Session {
         id: SessionId(row.get(0)?),
+        network: row.get::<_, Option<i64>>(5)?.map(NetworkId),
         started: Timestamp::from_micros(row.get(1)?),
         last_alive: Timestamp::from_micros(row.get(2)?),
         ended,
     })
+}
+
+/// The first of `network-1`, `network-2`, … that no network has, counting
+/// from how many there are.
+fn unused_label(conn: &Connection) -> rusqlite::Result<String> {
+    let mut n: i64 = conn.query_row("SELECT count(*) FROM networks", [], |row| row.get(0))?;
+    loop {
+        n += 1;
+        let label = format!("network-{n}");
+        let taken = conn
+            .query_row("SELECT 1 FROM networks WHERE label = ?1", [&label], |_| {
+                Ok(())
+            })
+            .optional()?;
+        if taken.is_none() {
+            return Ok(label);
+        }
+    }
 }
 
 /// The store, claimed by the one collector allowed to record into it.
@@ -612,23 +719,64 @@ impl Collecting {
         )?))
     }
 
-    /// Begins a collector run at `now` that will probe `targets`.
+    /// The identity of `network`, registering it if it is new.
+    ///
+    /// A newly detected network is labeled `network-1`, `network-2`, and so
+    /// on, for the user to rename; a named one keeps its name.
+    pub fn network(&mut self, network: &SessionNetwork) -> Result<NetworkId, StoreError> {
+        let tx = self.store.conn.transaction()?;
+        let id = match network {
+            SessionNetwork::Named(label) => {
+                tx.execute(
+                    "INSERT OR IGNORE INTO networks (label) VALUES (?1)",
+                    [label],
+                )?;
+                tx.query_row("SELECT id FROM networks WHERE label = ?1", [label], |row| {
+                    row.get(0)
+                })?
+            }
+            SessionNetwork::Detected(observed) => {
+                let known = tx
+                    .query_row(
+                        "SELECT id FROM networks WHERE gateway_mac = ?1",
+                        [&observed.gateway_mac],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(id) = known {
+                    id
+                } else {
+                    tx.execute(
+                        "INSERT INTO networks (gateway_mac, label) VALUES (?1, ?2)",
+                        params![observed.gateway_mac, unused_label(&tx)?],
+                    )?;
+                    tx.last_insert_rowid()
+                }
+            }
+        };
+        tx.commit()?;
+        Ok(NetworkId(id))
+    }
+
+    /// Begins a collector run at `now` on `network` that will probe `targets`.
     pub fn start_session(
         &mut self,
         now: Timestamp,
         settings: SessionSettings,
+        network: Option<NetworkId>,
         targets: &[TargetId],
     ) -> Result<SessionId, StoreError> {
         let tx = self.store.conn.transaction()?;
         tx.execute(
             "INSERT INTO sessions
-               (started_us, last_alive_us, interval_us, timeout_us, pingr_version)
-             VALUES (?1, ?1, ?2, ?3, ?4)",
+               (started_us, last_alive_us, interval_us, timeout_us, pingr_version, network_id)
+             VALUES (?1, ?1, ?2, ?3, ?4, ?5)",
             params![
                 now.as_micros(),
                 micros(settings.interval),
                 micros(settings.timeout),
                 env!("CARGO_PKG_VERSION"),
+                network.map(|network| network.0),
             ],
         )?;
         let session = SessionId(tx.last_insert_rowid());

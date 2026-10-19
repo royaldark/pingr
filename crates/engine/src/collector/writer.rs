@@ -14,9 +14,10 @@ use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
 
+use crate::network::SessionNetwork;
 use crate::store::{
-    AddressId, Collecting, EndReason, NewSample, Outcome, SessionId, SessionSettings, StoreError,
-    TargetId,
+    AddressId, Collecting, EndReason, NetworkId, NewSample, Outcome, SessionId, SessionSettings,
+    StoreError, TargetId,
 };
 use crate::time::Timestamp;
 
@@ -44,8 +45,12 @@ pub(super) struct Record {
 }
 
 pub(super) enum Command {
-    /// Begin the session numbered `generation`.
-    Start { generation: u64, at: Timestamp },
+    /// Begin the session numbered `generation`, on `network` if known.
+    Start {
+        generation: u64,
+        at: Timestamp,
+        network: Option<SessionNetwork>,
+    },
     /// Store `records` and mark session `generation` alive at `at`.
     Record {
         generation: u64,
@@ -65,6 +70,7 @@ pub(super) struct Writer {
     settings: SessionSettings,
     targets: Vec<TargetId>,
     sessions: HashMap<u64, SessionId>,
+    networks: HashMap<SessionNetwork, NetworkId>,
     addresses: HashMap<(usize, IpAddr), AddressId>,
     queue: VecDeque<Command>,
     notices: UnboundedSender<String>,
@@ -89,6 +95,7 @@ impl Writer {
             settings,
             targets,
             sessions: HashMap::new(),
+            networks: HashMap::new(),
             addresses: HashMap::new(),
             queue: VecDeque::new(),
             notices,
@@ -166,11 +173,19 @@ impl Writer {
     /// Applies one command. Must be safe to repeat after a failure.
     fn apply(&mut self, command: &Command) -> Result<(), StoreError> {
         match command {
-            Command::Start { generation, at } => {
+            Command::Start {
+                generation,
+                at,
+                network,
+            } => {
                 if !self.sessions.contains_key(generation) {
-                    let session = self
-                        .store
-                        .start_session(*at, self.settings, &self.targets)?;
+                    let network = match network {
+                        None => None,
+                        Some(network) => Some(self.network(network)?),
+                    };
+                    let session =
+                        self.store
+                            .start_session(*at, self.settings, network, &self.targets)?;
                     self.sessions.insert(*generation, session);
                 }
             }
@@ -212,6 +227,15 @@ impl Writer {
             address,
             outcome: record.outcome,
         })
+    }
+
+    fn network(&mut self, network: &SessionNetwork) -> Result<NetworkId, StoreError> {
+        if let Some(&id) = self.networks.get(network) {
+            return Ok(id);
+        }
+        let id = self.store.network(network)?;
+        self.networks.insert(network.clone(), id);
+        Ok(id)
     }
 
     fn address(&mut self, target: usize, ip: IpAddr) -> Result<AddressId, StoreError> {
