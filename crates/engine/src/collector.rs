@@ -17,6 +17,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::clock::WallClock;
+use crate::network::{NetworkDetector, Observed, SessionNetwork};
 use crate::prober::{ProbeError, Prober};
 use crate::resolve::Resolver;
 use crate::store::{Collecting, EndReason, Loss, Outcome, SessionSettings, StoreError};
@@ -40,6 +41,11 @@ pub struct Config {
     /// How far the schedule may slip, or the wall clock may disagree with
     /// elapsed time, before the run is cut and a new session begun.
     pub gap_tolerance: Duration,
+    /// The network to record every session as, with detection turned off.
+    /// `None` detects it.
+    pub network: Option<String>,
+    /// How often the network is checked for a change.
+    pub network_interval: Duration,
 }
 
 impl Config {
@@ -52,6 +58,8 @@ impl Config {
             resolve_interval: Duration::from_secs(300),
             resolve_retry: Duration::from_secs(10),
             gap_tolerance: Duration::from_secs(5),
+            network: None,
+            network_interval: Duration::from_secs(10),
         }
     }
 }
@@ -65,6 +73,12 @@ pub enum Event {
     SessionStarted {
         /// When.
         at: Timestamp,
+    },
+    /// Sessions from now on are on this network; `None` means it cannot be
+    /// told.
+    Network {
+        /// The network.
+        network: Option<SessionNetwork>,
     },
     /// The session was cut short; another follows unless the collector is
     /// stopping.
@@ -123,13 +137,15 @@ pub enum CollectError {
 }
 
 /// What the collector needs from the outside world.
-pub struct Deps<P, R, W> {
+pub struct Deps<P, R, W, N> {
     /// Sends the probes.
     pub prober: Arc<P>,
     /// Looks up host names.
     pub resolver: Arc<R>,
     /// Tells the time.
     pub wall: Arc<W>,
+    /// Tells which network the machine is on.
+    pub network: Arc<N>,
 }
 
 /// A message from a probe or lookup task back to the loop.
@@ -146,6 +162,7 @@ enum Message {
         target: usize,
         result: Result<Vec<IpAddr>, String>,
     },
+    Network(Option<Observed>),
 }
 
 /// Where a target stands.
@@ -164,9 +181,9 @@ struct TargetState {
 /// Collects until `stop` completes, then finishes the session cleanly.
 ///
 /// Every probe result and state change is also sent to `events`.
-pub async fn run<P, R, W>(
+pub async fn run<P, R, W, N>(
     config: Config,
-    deps: Deps<P, R, W>,
+    deps: Deps<P, R, W, N>,
     mut store: Collecting,
     events: broadcast::Sender<Event>,
     stop: impl Future<Output = ()>,
@@ -175,6 +192,7 @@ where
     P: Prober + 'static,
     R: Resolver + 'static,
     W: WallClock + 'static,
+    N: NetworkDetector + 'static,
 {
     if config.targets.is_empty() {
         return Err(CollectError::NoTargets);
@@ -195,6 +213,9 @@ where
     let (outbox, inbox) = mpsc::unbounded_channel();
     let mut collector = Collector {
         targets: targets(&config),
+        network: config.network.clone().map(SessionNetwork::Named),
+        detect_at: Instant::now() + config.network_interval,
+        detecting: false,
         config,
         deps,
         events,
@@ -237,13 +258,18 @@ fn targets(config: &Config) -> Vec<TargetState> {
         .collect()
 }
 
-struct Collector<P, R, W> {
+struct Collector<P, R, W, N> {
     config: Config,
-    deps: Deps<P, R, W>,
+    deps: Deps<P, R, W, N>,
     events: broadcast::Sender<Event>,
     commands: std::sync::mpsc::Sender<Command>,
     outbox: mpsc::UnboundedSender<Message>,
     targets: Vec<TargetState>,
+    /// The network sessions are recorded as on.
+    network: Option<SessionNetwork>,
+    /// When to check the network next.
+    detect_at: Instant,
+    detecting: bool,
     /// Counts sessions within this run; the writer maps it to a session id.
     generation: u64,
     /// Results waiting for the next write.
@@ -256,11 +282,12 @@ struct Collector<P, R, W> {
     writer_finished: bool,
 }
 
-impl<P, R, W> Collector<P, R, W>
+impl<P, R, W, N> Collector<P, R, W, N>
 where
     P: Prober + 'static,
     R: Resolver + 'static,
     W: WallClock + 'static,
+    N: NetworkDetector + 'static,
 {
     async fn collect(
         &mut self,
@@ -270,6 +297,17 @@ where
         stop: impl Future<Output = ()>,
     ) -> Result<(), CollectError> {
         self.resolve_all(&mut inbox).await;
+        if self.detects() {
+            self.network = self
+                .deps
+                .network
+                .detect()
+                .await
+                .map(SessionNetwork::Detected);
+        }
+        self.emit(Event::Network {
+            network: self.network.clone(),
+        });
         self.start_session(self.deps.wall.now());
 
         let mut ticker = tokio::time::interval(self.config.interval);
@@ -301,6 +339,8 @@ where
         // Let probes already on the wire finish; each ends by its timeout.
         while self.in_flight > 0 {
             match inbox.recv().await {
+                // Too late to start another session.
+                Some(Message::Network(_)) => {}
                 Some(message) => self.handle(message)?,
                 None => break,
             }
@@ -325,6 +365,7 @@ where
         self.command(Command::Start {
             generation: self.generation,
             at,
+            network: self.network.clone(),
         });
         self.emit(Event::SessionStarted { at });
     }
@@ -365,7 +406,7 @@ where
                     self.resolved(target, result);
                     waiting -= 1;
                 }
-                Some(Message::Probed { .. }) | None => break,
+                Some(Message::Probed { .. } | Message::Network(_)) | None => break,
             }
         }
     }
@@ -424,8 +465,54 @@ where
         }
     }
 
+    /// Whether the network is detected, rather than named by the user.
+    fn detects(&self) -> bool {
+        self.config.network.is_none()
+    }
+
+    fn detect(&mut self) {
+        self.detecting = true;
+        let detector = Arc::clone(&self.deps.network);
+        let outbox = self.outbox.clone();
+        tokio::spawn(async move {
+            let _ = outbox.send(Message::Network(detector.detect().await));
+        });
+    }
+
+    /// Cuts the session if the machine is now on another network. A network
+    /// that cannot be told is no change: losing the default route is
+    /// something to record as loss on the network it happened to.
+    fn detected(&mut self, observed: Option<Observed>) {
+        self.detecting = false;
+        self.detect_at = Instant::now() + self.config.network_interval;
+        let Some(observed) = observed.map(SessionNetwork::Detected) else {
+            return;
+        };
+        if self.network.as_ref() == Some(&observed) {
+            return;
+        }
+        let now = self.deps.wall.now();
+        self.flush(now);
+        self.end_session(now, EndReason::NetworkChanged);
+        self.network = Some(observed);
+        self.emit(Event::Network {
+            network: self.network.clone(),
+        });
+        self.next_session(now);
+    }
+
+    /// Begins a new session at `at`, the previous one having ended.
+    fn next_session(&mut self, at: Timestamp) {
+        self.generation += 1;
+        for target in &mut self.targets {
+            target.next_seq = 0;
+        }
+        self.start_session(at);
+    }
+
     fn handle(&mut self, message: Message) -> Result<(), CollectError> {
         match message {
+            Message::Network(observed) => self.detected(observed),
             Message::Resolved { target, result } => self.resolved(target, result),
             Message::Probed {
                 generation,
@@ -496,15 +583,14 @@ where
         if let Some((last_alive, reason)) = self.interruption(mono, wall) {
             self.flush(last_alive);
             self.end_session(last_alive, reason);
-            self.generation += 1;
-            for target in &mut self.targets {
-                target.next_seq = 0;
-            }
-            self.start_session(wall);
+            self.next_session(wall);
         }
         self.last_tick = Some((mono, wall));
         self.flush(wall);
 
+        if self.detects() && !self.detecting && mono >= self.detect_at {
+            self.detect();
+        }
         for target in 0..self.targets.len() {
             let state = &self.targets[target];
             if !state.literal && !state.resolving && mono >= state.resolve_at {

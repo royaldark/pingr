@@ -51,6 +51,9 @@ enum Command {
     Stats {
         /// Targets to report on [default: all]
         targets: Vec<String>,
+        /// Only samples taken on this network [default: each network separately]
+        #[arg(long, value_name = "LABEL")]
+        network: Option<String>,
         #[command(flatten)]
         range: RangeArgs,
         /// Print JSON instead of a table
@@ -60,6 +63,9 @@ enum Command {
     /// Every sample for one target over a time range
     History {
         target: String,
+        /// Only samples taken on this network
+        #[arg(long, value_name = "LABEL")]
+        network: Option<String>,
         #[command(flatten)]
         range: RangeArgs,
         /// Print JSON instead of text
@@ -68,6 +74,14 @@ enum Command {
     },
     /// The targets that have data, and the span it covers
     Targets {
+        /// Print JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+    /// The networks collected on, which `stats` reports separately
+    Networks {
+        #[command(subcommand)]
+        action: Option<NetworksAction>,
         /// Print JSON instead of a table
         #[arg(long)]
         json: bool,
@@ -89,6 +103,17 @@ enum Command {
         /// Do not ask for confirmation
         #[arg(long, short)]
         yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum NetworksAction {
+    /// Give a network a label of your choosing
+    Rename {
+        /// Its current label, as `pingr networks` lists it
+        label: String,
+        /// The label to give it
+        new_label: String,
     },
 }
 
@@ -180,19 +205,46 @@ fn dispatch(cli: Cli) -> Result<(), String> {
         Command::Run(args) => run::run(&db, &args),
         Command::Stats {
             targets,
+            network,
             range,
             json,
         } => {
             let range = range.resolve(now)?;
-            render::stats(&open()?, &targets, range, now, json, &mut out).map_err(read_error)
+            render::stats(
+                &open()?,
+                &targets,
+                network.as_deref(),
+                range,
+                now,
+                json,
+                &mut out,
+            )
+            .map_err(read_error)
         }
         Command::History {
             target,
+            network,
             range,
             json,
         } => {
             let range = range.resolve(now)?;
-            render::history(&open()?, &target, range, json, &mut out).map_err(read_error)
+            render::history(&open()?, &target, network.as_deref(), range, json, &mut out)
+                .map_err(read_error)
+        }
+        Command::Networks { action: None, json } => {
+            render::networks(&open()?, json, &mut out).map_err(read_error)
+        }
+        Command::Networks {
+            action: Some(NetworksAction::Rename { label, new_label }),
+            ..
+        } => {
+            if new_label.trim().is_empty() {
+                return Err("a network's label cannot be empty".to_owned());
+            }
+            open()?
+                .rename_network(&label, &new_label)
+                .map_err(|error| chain(&error))?;
+            writeln!(out, "Renamed {label} to {new_label}.").map_err(|error| chain(&error))
         }
         Command::Targets { json } => render::targets(&open()?, json, &mut out).map_err(read_error),
         Command::Status { json } => {

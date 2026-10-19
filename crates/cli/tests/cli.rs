@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-use pingr_engine::store::{EndReason, Loss, NewSample, Outcome, SessionSettings, Store};
+use pingr_engine::network::{Observed, SessionNetwork};
+use pingr_engine::store::{
+    Collecting, EndReason, Loss, NewSample, Outcome, SessionSettings, Store,
+};
 use pingr_engine::time::Timestamp;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -22,21 +25,47 @@ fn scratch() -> (TempDir, PathBuf) {
     (dir, path)
 }
 
-/// A store holding one ten-second run against `example.com`: answers of 10,
-/// 20, 30, and 40 ms and one loss.
+const SETTINGS: SessionSettings = SessionSettings {
+    interval: Duration::from_secs(1),
+    timeout: Duration::from_secs(2),
+};
+
+fn detected(mac: &str) -> SessionNetwork {
+    SessionNetwork::Detected(Observed {
+        gateway_mac: mac.to_owned(),
+    })
+}
+
+/// A store holding one ten-second run against `example.com` on the network
+/// it labels `network-1`: answers of 10, 20, 30, and 40 ms and one loss.
 fn seeded() -> (TempDir, PathBuf) {
     let (dir, path) = scratch();
-    let mut collecting = Store::create_or_open(&path)
+    drop(seed(&path));
+    (dir, path)
+}
+
+/// [`seeded`], plus a second run on another network.
+///
+/// Both runs go in under one claim on the store: a claim released and taken
+/// again can collide with a lock briefly inherited by a `pingr` that another
+/// test is starting.
+fn seeded_on_two_networks() -> (TempDir, PathBuf) {
+    let (dir, path) = scratch();
+    on_another_network(&mut seed(&path));
+    (dir, path)
+}
+
+fn seed(path: &Path) -> Collecting {
+    let mut collecting = Store::create_or_open(path)
         .expect("create")
         .collect()
         .expect("claim");
     let target = collecting.target("example.com").expect("target");
-    let settings = SessionSettings {
-        interval: Duration::from_secs(1),
-        timeout: Duration::from_secs(2),
-    };
+    let network = collecting
+        .network(&detected("02:00:00:00:00:01"))
+        .expect("network");
     let session = collecting
-        .start_session(at(0), settings, &[target])
+        .start_session(at(0), SETTINGS, Some(network), &[target])
         .expect("session");
     let outcomes = [Some(10), Some(20), None, Some(30), Some(40)];
     let samples: Vec<_> = (0u32..)
@@ -58,7 +87,37 @@ fn seeded() -> (TempDir, PathBuf) {
     collecting
         .end_session(session, at(10), EndReason::Stopped)
         .expect("end");
-    (dir, path)
+    collecting
+}
+
+/// Adds a second run, from 20 s, on another network (`network-2`): three
+/// answers of 100 ms.
+fn on_another_network(collecting: &mut Collecting) {
+    let target = collecting.target("example.com").expect("target");
+    let network = collecting
+        .network(&detected("02:00:00:00:00:02"))
+        .expect("network");
+    let session = collecting
+        .start_session(at(20), SETTINGS, Some(network), &[target])
+        .expect("session");
+    let samples: Vec<_> = (0u32..3)
+        .map(|seq| NewSample {
+            session,
+            target,
+            sent: at(20 + i64::from(seq)),
+            seq,
+            address: None,
+            outcome: Outcome::Reply {
+                rtt: Duration::from_millis(100),
+            },
+        })
+        .collect();
+    collecting
+        .record(session, at(23), &samples)
+        .expect("record");
+    collecting
+        .end_session(session, at(23), EndReason::Stopped)
+        .expect("end");
 }
 
 fn pingr(db: &Path, args: &[&str]) -> Output {
@@ -341,4 +400,100 @@ fn a_range_before_any_collection_says_the_collector_was_not_running() {
         text.contains("the collector was not running then"),
         "{text}"
     );
+}
+
+#[test]
+fn stats_never_mix_networks_and_can_be_limited_to_one() {
+    let (_dir, db) = seeded_on_two_networks();
+    let renamed = pingr(&db, &["networks", "rename", "network-2", "cafe"]);
+    assert!(renamed.status.success(), "{}", stderr(&renamed));
+    let range = [
+        "--since",
+        "2023-11-14T22:13:20Z",
+        "--until",
+        "2023-11-14T22:15:00Z",
+        "--json",
+    ];
+
+    let output = pingr(&db, &[&["stats"][..], &range].concat());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let json: Value = serde_json::from_str(&stdout(&output)).expect("valid JSON");
+    let rows: Vec<_> = json
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|row| {
+            (
+                row["network"].clone(),
+                row["sent"].clone(),
+                row["loss"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("network-1".into(), 5.into(), 0.2.into()),
+            ("cafe".into(), 3.into(), 0.0.into()),
+        ]
+    );
+
+    let output = pingr(&db, &[&["stats", "--network", "cafe"][..], &range].concat());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let json: Value = serde_json::from_str(&stdout(&output)).expect("valid JSON");
+    assert_eq!(json.as_array().expect("an array").len(), 1);
+    assert_eq!(json[0]["rtt_ms"]["max"], 100.0);
+}
+
+#[test]
+fn history_says_where_the_network_changed() {
+    let (_dir, db) = seeded_on_two_networks();
+
+    let output = pingr(
+        &db,
+        &[
+            "history",
+            "example.com",
+            "--since",
+            "2023-11-14T22:13:20Z",
+            "--until",
+            "2023-11-14T22:15:00Z",
+        ],
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    let headings: Vec<_> = text.lines().filter(|line| line.starts_with("--")).collect();
+    assert_eq!(headings.len(), 2, "{text}");
+    assert!(headings[0].contains("on network-1"), "{text}");
+    assert!(headings[1].contains("on network-2 from"), "{text}");
+}
+
+#[test]
+fn an_unknown_network_fails_and_lists_the_known_ones() {
+    let (_dir, db) = seeded();
+
+    let output = pingr(&db, &["stats", "--network", "office", "--json"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("network-1"), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "", "prose leaked into JSON output");
+}
+
+#[test]
+fn a_network_cannot_take_a_label_already_in_use() {
+    let (_dir, db) = seeded_on_two_networks();
+
+    let output = pingr(&db, &["networks", "rename", "network-2", "network-1"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("already labeled `network-1`"),
+        "{}",
+        stderr(&output)
+    );
+    let listed = pingr(&db, &["networks", "--json"]);
+    let json: Value = serde_json::from_str(&stdout(&listed)).expect("valid JSON");
+    assert_eq!(json[1]["network"], "network-2");
+    assert_eq!(json[1]["gateway_mac"], "02:00:00:00:00:02");
 }
