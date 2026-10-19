@@ -169,7 +169,7 @@ async fn collect(
         prober: Arc::new(IcmpProber::new(config.timeout)),
         resolver: Arc::new(SystemResolver),
         wall: Arc::new(SystemClock),
-        network: Arc::new(SystemNetwork),
+        network: Arc::new(SystemNetwork::default()),
     };
 
     let mut out = io::stdout();

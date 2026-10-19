@@ -661,19 +661,33 @@ fn read_session(row: &Row<'_>) -> rusqlite::Result<Session> {
     })
 }
 
-/// The first of `network-1`, `network-2`, … that no network has, counting
-/// from how many there are.
-fn unused_label(conn: &Connection) -> rusqlite::Result<String> {
+/// A label no network has: `ssid`, `ssid-2`, `ssid-3`, … for a Wi-Fi
+/// network, otherwise the first of `network-1`, `network-2`, … counting from
+/// how many networks there are.
+fn unused_label(conn: &Connection, ssid: Option<&str>) -> rusqlite::Result<String> {
+    let taken = |label: &str| {
+        conn.query_row("SELECT 1 FROM networks WHERE label = ?1", [label], |_| {
+            Ok(())
+        })
+        .optional()
+        .map(|found| found.is_some())
+    };
+    if let Some(ssid) = ssid {
+        if !taken(ssid)? {
+            return Ok(ssid.to_owned());
+        }
+        for n in 2.. {
+            let label = format!("{ssid}-{n}");
+            if !taken(&label)? {
+                return Ok(label);
+            }
+        }
+    }
     let mut n: i64 = conn.query_row("SELECT count(*) FROM networks", [], |row| row.get(0))?;
     loop {
         n += 1;
         let label = format!("network-{n}");
-        let taken = conn
-            .query_row("SELECT 1 FROM networks WHERE label = ?1", [&label], |_| {
-                Ok(())
-            })
-            .optional()?;
-        if taken.is_none() {
+        if !taken(&label)? {
             return Ok(label);
         }
     }
@@ -721,8 +735,10 @@ impl Collecting {
 
     /// The identity of `network`, registering it if it is new.
     ///
-    /// A newly detected network is labeled `network-1`, `network-2`, and so
-    /// on, for the user to rename; a named one keeps its name.
+    /// A newly detected network is labeled with its Wi-Fi name if it has one
+    /// (`Home`, or `Home-2` if that is taken), and otherwise `network-1`,
+    /// `network-2`, and so on, for the user to rename. A named one keeps its
+    /// name.
     pub fn network(&mut self, network: &SessionNetwork) -> Result<NetworkId, StoreError> {
         let tx = self.store.conn.transaction()?;
         let id = match network {
@@ -748,7 +764,10 @@ impl Collecting {
                 } else {
                     tx.execute(
                         "INSERT INTO networks (gateway_mac, label) VALUES (?1, ?2)",
-                        params![observed.gateway_mac, unused_label(&tx)?],
+                        params![
+                            observed.gateway_mac,
+                            unused_label(&tx, observed.ssid.as_deref())?
+                        ],
                     )?;
                     tx.last_insert_rowid()
                 }
