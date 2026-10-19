@@ -64,7 +64,34 @@ Targets and settings can also come from a file, `pingr run --config pingr.toml`:
 targets = ["1.1.1.1", "example.com"]
 interval = "1s"
 timeout = "2s"
+network = "home"    # optional: see Networks below
 ```
+
+### Networks
+
+pingr notes which network each result was taken on, and `stats` reports each
+network on its own row, so a laptop's home Wi-Fi and the café down the road are
+never averaged together. A network is recognized by the hardware address of
+its default gateway (the router), which works the same over Wi-Fi and Ethernet
+and needs no special rights. New networks are labeled `network-1`,
+`network-2`, and so on; give them names of your own:
+
+```
+pingr networks                          # each network, its gateway, when seen
+pingr networks rename network-1 home
+pingr stats --network home --last 7d    # one network only
+pingr history example.com --network home --last 1h
+```
+
+When the machine moves to another network while collecting, pingr ends the
+session and starts a new one on the new network. Losing the network altogether
+(no default route) is not a move: probes keep going, and their losses count
+against the network you were on.
+
+To label results yourself instead, for example when a VPN hides the real
+gateway, pass `pingr run --network <label>`: detection is then off, and every
+result from that run goes under that label. Naming a label that a detected
+network already has adds to that network's results.
 
 ## What the numbers mean
 
@@ -126,6 +153,11 @@ WantedBy=default.target
 **Suspend and clock changes.** When the machine sleeps or its clock is changed,
 pingr ends the current session and starts a new one, so the pause shows up as
 a gap rather than as loss.
+
+**Network changes.** The network is checked every ten seconds, so up to ten
+seconds of results after a move are still counted toward the previous network.
+When the gateway cannot be read (behind some VPNs, say), results are labeled
+`unknown` unless you pass `--network`.
 
 **Names.** A host name is looked up when collection starts and again every
 five minutes; each sample records the address it was sent to.

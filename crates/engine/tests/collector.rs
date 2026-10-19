@@ -7,10 +7,12 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use pingr_engine::clock::WallClock;
 use pingr_engine::collector::{CollectError, Config, Deps, Event, run};
+use pingr_engine::network::{NetworkDetector, Observed, SessionNetwork};
 use pingr_engine::prober::ProbeError;
 use pingr_engine::prober::sim::{Sim, SimProber};
 use pingr_engine::resolve::Resolver;
@@ -69,6 +71,31 @@ impl Resolver for Names {
     }
 }
 
+/// A network the test moves the machine on and off.
+struct Gateway(Mutex<Option<&'static str>>);
+
+impl Gateway {
+    fn new(mac: Option<&'static str>) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(mac)))
+    }
+
+    fn set(&self, mac: Option<&'static str>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = mac;
+    }
+}
+
+impl NetworkDetector for Gateway {
+    fn detect(&self) -> impl Future<Output = Option<Observed>> + Send {
+        let mac = *self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        std::future::ready(mac.map(|mac| Observed {
+            gateway_mac: mac.to_owned(),
+        }))
+    }
+}
+
+const HOME: &str = "02:00:00:00:00:01";
+const CAFE: &str = "02:00:00:00:00:02";
+
 fn ip(text: &str) -> IpAddr {
     text.parse().expect("literal address")
 }
@@ -77,6 +104,7 @@ struct Harness {
     _dir: TempDir,
     path: PathBuf,
     clock: Arc<TestClock>,
+    gateway: Arc<Gateway>,
     names: HashMap<&'static str, IpAddr>,
 }
 
@@ -88,6 +116,7 @@ impl Harness {
             _dir: dir,
             path,
             clock: TestClock::new(),
+            gateway: Gateway::new(Some(HOME)),
             names: HashMap::new(),
         }
     }
@@ -102,15 +131,29 @@ impl Harness {
     where
         F: Fn(IpAddr, u64) -> Sim + Send + Sync + 'static,
     {
+        let config = Config::new(targets.iter().map(|&name| name.to_owned()).collect());
+        self.collect_with(config, prober, script).await
+    }
+
+    /// Collects as `config` says against `prober` until `script` returns.
+    async fn collect_with<F>(
+        &self,
+        config: Config,
+        prober: SimProber<F>,
+        script: impl Future<Output = ()>,
+    ) -> (Result<(), CollectError>, Vec<Event>)
+    where
+        F: Fn(IpAddr, u64) -> Sim + Send + Sync + 'static,
+    {
         let store = Store::create_or_open(&self.path)
             .expect("create store")
             .collect()
             .expect("claim store");
-        let config = Config::new(targets.iter().map(|&name| name.to_owned()).collect());
         let deps = Deps {
             prober: Arc::new(prober),
             resolver: Arc::new(Names(self.names.clone())),
             wall: Arc::clone(&self.clock),
+            network: Arc::clone(&self.gateway),
         };
         let (events, mut seen) = broadcast::channel(4096);
         let result = run(config, deps, store, events, script).await;
@@ -388,6 +431,7 @@ async fn samples_taken_while_the_store_is_busy_are_kept_and_written_later() {
         })),
         resolver: Arc::new(Names(HashMap::new())),
         wall: Arc::new(pingr_engine::clock::SystemClock),
+        network: Gateway::new(Some(HOME)),
     };
     let (events, mut seen) = broadcast::channel(4096);
     let path = harness.path.clone();
@@ -461,6 +505,7 @@ async fn when_a_name_moves_the_new_address_is_probed_and_the_old_one_released() 
             then: new,
         }),
         wall: Arc::clone(&harness.clock),
+        network: Arc::clone(&harness.gateway),
     };
     let store = Store::create_or_open(&harness.path)
         .expect("create store")
@@ -487,4 +532,142 @@ async fn when_a_name_moves_the_new_address_is_probed_and_the_old_one_released() 
         .count();
     assert_eq!(at_new, 2, "probes at 301 s and 302 s go to the new address");
     assert_eq!(prober.forgotten(), [old]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn moving_to_another_network_starts_a_new_session_on_it() {
+    let harness = Harness::new();
+    let gateway = Arc::clone(&harness.gateway);
+
+    let (result, events) = harness
+        .collect(&["192.0.2.1"], prompt(2 * SECOND), async {
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+            gateway.set(Some(CAFE));
+            tokio::time::sleep(Duration::from_secs(20)).await;
+        })
+        .await;
+
+    result.expect("clean stop");
+    let store = harness.store();
+    let sessions = store.sessions("192.0.2.1", EVERYTHING).expect("sessions");
+    assert_eq!(sessions.len(), 2);
+    assert!(matches!(
+        sessions[0].ended,
+        Some((_, EndReason::NetworkChanged))
+    ));
+    assert_ne!(sessions[0].network, sessions[1].network);
+
+    // Every sample carries the network of the session that sent it, and
+    // none is lost in the switch.
+    let samples = harness.samples("192.0.2.1");
+    let first_on_cafe = samples
+        .iter()
+        .position(|sample| sample.network == sessions[1].network)
+        .expect("samples on the second network");
+    assert!(
+        samples[..first_on_cafe]
+            .iter()
+            .all(|sample| sample.network == sessions[0].network)
+    );
+    assert_eq!(
+        sent_at(&samples),
+        (0..23).map(f64::from).collect::<Vec<_>>()
+    );
+
+    let gateways: Vec<_> = store
+        .networks()
+        .expect("networks")
+        .into_iter()
+        .map(|network| network.gateway_mac)
+        .collect();
+    assert_eq!(gateways, [Some(HOME.to_owned()), Some(CAFE.to_owned())]);
+    let announced: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Network { network } => Some(network.clone()),
+            _ => None,
+        })
+        .collect();
+    let detected = |mac: &str| {
+        Some(SessionNetwork::Detected(Observed {
+            gateway_mac: mac.to_owned(),
+        }))
+    };
+    assert_eq!(announced, [detected(HOME), detected(CAFE)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn losing_the_default_route_is_loss_on_the_same_network_not_a_new_session() {
+    let harness = Harness::new();
+    let gateway = Arc::clone(&harness.gateway);
+
+    let (result, _) = harness
+        .collect(&["192.0.2.1"], prompt(2 * SECOND), async {
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+            gateway.set(None);
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            gateway.set(Some(HOME));
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        })
+        .await;
+
+    result.expect("clean stop");
+    let sessions = harness
+        .store()
+        .sessions("192.0.2.1", EVERYTHING)
+        .expect("sessions");
+    assert_eq!(sessions.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_network_first_seen_after_startup_ends_the_unknown_session() {
+    let harness = Harness::new();
+    harness.gateway.set(None);
+    let gateway = Arc::clone(&harness.gateway);
+
+    let (result, _) = harness
+        .collect(&["192.0.2.1"], prompt(2 * SECOND), async {
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+            gateway.set(Some(HOME));
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        })
+        .await;
+
+    result.expect("clean stop");
+    let store = harness.store();
+    let sessions = store.sessions("192.0.2.1", EVERYTHING).expect("sessions");
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].network, None);
+    assert_eq!(
+        sessions[1].network,
+        Some(store.network_by_label("network-1").expect("labeled"))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_named_network_is_used_for_every_session_and_never_detected() {
+    let harness = Harness::new();
+    let gateway = Arc::clone(&harness.gateway);
+    let mut config = Config::new(vec!["192.0.2.1".to_owned()]);
+    config.network = Some("cafe".to_owned());
+
+    let (result, _) = harness
+        .collect_with(config, prompt(2 * SECOND), async {
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+            gateway.set(Some(CAFE));
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        })
+        .await;
+
+    result.expect("clean stop");
+    let store = harness.store();
+    let sessions = store.sessions("192.0.2.1", EVERYTHING).expect("sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].network,
+        Some(store.network_by_label("cafe").expect("labeled"))
+    );
+    let networks = store.networks().expect("networks");
+    assert_eq!(networks.len(), 1);
+    assert_eq!(networks[0].gateway_mac, None);
 }

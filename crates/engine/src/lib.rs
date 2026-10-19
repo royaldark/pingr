@@ -2,6 +2,7 @@
 
 pub mod clock;
 pub mod collector;
+pub mod network;
 pub mod prober;
 pub mod resolve;
 pub mod stats;

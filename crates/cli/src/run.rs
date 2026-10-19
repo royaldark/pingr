@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use pingr_engine::clock::SystemClock;
 use pingr_engine::collector::{self, CollectError, Config, Deps, Event};
+use pingr_engine::network::SystemNetwork;
 use pingr_engine::prober::icmp::IcmpProber;
 use pingr_engine::resolve::SystemResolver;
 use pingr_engine::store::Store;
@@ -35,6 +36,10 @@ pub struct RunArgs {
     /// How long to wait for an answer before a probe counts as lost [default: 2s]
     #[arg(long, value_name = "SPAN")]
     timeout: Option<Span>,
+    /// Record everything as taken on this network, instead of telling networks
+    /// apart by their gateway
+    #[arg(long, value_name = "LABEL")]
+    network: Option<String>,
     /// What to show while collecting [default: tui in a terminal, summary otherwise]
     #[arg(long, value_enum)]
     output: Option<Mode>,
@@ -55,6 +60,7 @@ struct FileConfig {
     targets: Vec<String>,
     interval: Option<String>,
     timeout: Option<String>,
+    network: Option<String>,
 }
 
 fn file_config(path: Option<&Path>) -> Result<FileConfig, String> {
@@ -88,6 +94,14 @@ fn settings(args: &RunArgs) -> Result<Config, String> {
     }
     if let Some(Span(timeout)) = args.timeout.or(span(file.timeout)?) {
         config.timeout = timeout;
+    }
+    config.network = args.network.clone().or(file.network);
+    if config
+        .network
+        .as_ref()
+        .is_some_and(|label| label.trim().is_empty())
+    {
+        return Err("--network needs a label".to_owned());
     }
     if config.interval.is_zero() || config.timeout.is_zero() {
         return Err("--interval and --timeout must be longer than zero".to_owned());
@@ -155,6 +169,7 @@ async fn collect(
         prober: Arc::new(IcmpProber::new(config.timeout)),
         resolver: Arc::new(SystemResolver),
         wall: Arc::new(SystemClock),
+        network: Arc::new(SystemNetwork),
     };
 
     let mut out = io::stdout();

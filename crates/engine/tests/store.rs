@@ -4,6 +4,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use pingr_engine::network::{Observed, SessionNetwork};
 use pingr_engine::store::{
     Collecting, EndReason, Loss, NewSample, Outcome, SessionId, SessionSettings, Store, StoreError,
     TargetId,
@@ -51,7 +52,7 @@ fn collecting(path: &std::path::Path) -> (Collecting, TargetId, SessionId) {
         .expect("claim store");
     let target = collecting.target("example.com").expect("target");
     let session = collecting
-        .start_session(at(0), SETTINGS, &[target])
+        .start_session(at(0), SETTINGS, None, &[target])
         .expect("session");
     (collecting, target, session)
 }
@@ -224,7 +225,7 @@ fn prune_forgets_sessions_that_lie_entirely_before_the_cutoff() {
         .end_session(old, at(6), EndReason::Stopped)
         .expect("end");
     let current = collecting
-        .start_session(at(100), SETTINGS, &[target])
+        .start_session(at(100), SETTINGS, None, &[target])
         .expect("session");
 
     collecting.store().prune(at(50)).expect("prune");
@@ -258,7 +259,7 @@ fn a_wall_clock_stepping_backwards_loses_no_samples() {
         .end_session(first, at(10), EndReason::ClockJump)
         .expect("end");
     let second = collecting
-        .start_session(at(10), SETTINGS, &[target])
+        .start_session(at(10), SETTINGS, None, &[target])
         .expect("session");
     collecting
         .record(second, at(10), &[sample(second, target, 10, 0, REPLY)])
@@ -280,7 +281,7 @@ fn sessions_report_when_the_collector_was_and_was_not_running() {
         .expect("record");
     // The first run dies without a clean stop; a second starts later.
     let second = collecting
-        .start_session(at(100), SETTINGS, &[target])
+        .start_session(at(100), SETTINGS, None, &[target])
         .expect("session");
     collecting
         .end_session(second, at(130), EndReason::Stopped)
@@ -311,7 +312,7 @@ fn a_fresh_store_is_at_the_current_schema_and_reopens_with_its_data() {
     }
 
     let reopened = Store::create_or_open(&path).expect("reopen");
-    assert_eq!(reopened.schema_version().expect("version"), 1);
+    assert_eq!(reopened.schema_version().expect("version"), 2);
     assert_eq!(
         reopened
             .samples("example.com", EVERYTHING)
@@ -335,7 +336,7 @@ fn a_store_from_a_newer_pingr_is_refused_untouched() {
         result,
         Err(StoreError::SchemaTooNew {
             found: 99,
-            supported: 1
+            supported: 2
         })
     ));
     let raw = rusqlite::Connection::open(&path).expect("raw connection");
@@ -393,7 +394,96 @@ fn a_store_from_an_older_pingr_is_not_read_as_if_current() {
         result,
         Err(StoreError::SchemaTooOld {
             found: 0,
-            current: 1
+            current: 2
         })
     ));
+}
+
+fn detected(mac: &str) -> SessionNetwork {
+    SessionNetwork::Detected(Observed {
+        gateway_mac: mac.to_owned(),
+    })
+}
+
+#[test]
+fn a_detected_network_is_recognized_by_its_gateway_and_renamed_by_label() {
+    let (_dir, path) = scratch();
+    let (mut collecting, ..) = collecting(&path);
+    let home = collecting
+        .network(&detected("02:00:00:00:00:01"))
+        .expect("network");
+    let cafe = collecting
+        .network(&detected("02:00:00:00:00:02"))
+        .expect("network");
+    assert_ne!(home, cafe);
+    assert_eq!(
+        collecting
+            .network(&detected("02:00:00:00:00:01"))
+            .expect("network"),
+        home
+    );
+
+    let store = collecting.store();
+    assert_eq!(store.network_by_label("network-1").expect("label"), home);
+    store.rename_network("network-1", "home").expect("rename");
+    assert!(matches!(
+        store.rename_network("network-2", "home"),
+        Err(StoreError::LabelTaken(label)) if label == "home"
+    ));
+    assert!(matches!(
+        store.rename_network("network-9", "office"),
+        Err(StoreError::UnknownNetwork(_))
+    ));
+
+    // Naming the network by hand finds the detected one under its new label.
+    assert_eq!(
+        collecting
+            .network(&SessionNetwork::Named("home".to_owned()))
+            .expect("network"),
+        home
+    );
+    // A later new network does not reuse a label that is still taken.
+    let third = collecting
+        .network(&detected("02:00:00:00:00:03"))
+        .expect("network");
+    let labels: Vec<_> = collecting
+        .store()
+        .networks()
+        .expect("networks")
+        .into_iter()
+        .map(|network| (network.id, network.label))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            (home, "home".to_owned()),
+            (cafe, "network-2".to_owned()),
+            (third, "network-3".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_store_from_before_networks_is_upgraded_with_its_history_kept() {
+    let (_dir, path) = scratch();
+    let raw = rusqlite::Connection::open(&path).expect("raw connection");
+    raw.execute_batch(include_str!("../src/store/v1.sql"))
+        .expect("v1 schema");
+    raw.execute_batch(
+        "INSERT INTO targets (id, name) VALUES (1, 'example.com');
+         INSERT INTO sessions (id, started_us, last_alive_us, interval_us, timeout_us,
+                               pingr_version)
+           VALUES (1, 0, 5000000, 1000000, 2000000, '0.1.0');
+         INSERT INTO session_targets VALUES (1, 1);
+         INSERT INTO samples VALUES (1, 1000000, 1, 0, NULL, 12345, NULL);
+         PRAGMA user_version = 1;",
+    )
+    .expect("v1 data");
+    drop(raw);
+
+    let store = Store::create_or_open(&path).expect("upgrade");
+    assert_eq!(store.schema_version().expect("version"), 2);
+    let samples = store.samples("example.com", EVERYTHING).expect("read");
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].network, None);
 }

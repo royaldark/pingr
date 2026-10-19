@@ -76,6 +76,10 @@ pub fn notice(event: &Event, targets: &mut [Target]) -> Option<String> {
             };
             Some(line)
         }
+        Event::Network { network } => Some(network.as_ref().map_or_else(
+            || "cannot tell which network this is yet (no default gateway)".to_owned(),
+            |network| format!("on {network}"),
+        )),
         Event::ResolveFailed { target, error } => Some(format!(
             "{}: name lookup failed ({error})",
             targets[*target].name
@@ -87,6 +91,9 @@ pub fn notice(event: &Event, targets: &mut [Target]) -> Option<String> {
             }
             EndReason::Stalled => {
                 Some("probing stalled for a while: starting a new session".to_owned())
+            }
+            EndReason::NetworkChanged => {
+                Some("the network changed: starting a new session".to_owned())
             }
         },
         Event::StoreTrouble { error } => Some(format!(
