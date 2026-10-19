@@ -73,8 +73,9 @@ pingr notes which network each result was taken on, and `stats` reports each
 network on its own row, so a laptop's home Wi-Fi and the café down the road are
 never averaged together. A network is recognized by the hardware address of
 its default gateway (the router), which works the same over Wi-Fi and Ethernet
-and needs no special rights. New networks are labeled `network-1`,
-`network-2`, and so on; give them names of your own:
+and needs no special rights. A new Wi-Fi network is labeled with its name
+where the system will say it, and any other network `network-1`, `network-2`,
+and so on; rename them as you like:
 
 ```
 pingr networks                          # each network, its gateway, when seen
@@ -153,6 +154,14 @@ WantedBy=default.target
 **Suspend and clock changes.** When the machine sleeps or its clock is changed,
 pingr ends the current session and starts a new one, so the pause shows up as
 a gap rather than as loss.
+
+**Wi-Fi names.** pingr asks the tools each system ships with: `nmcli`, then
+`iw`, on Linux; `ipconfig` and `networksetup` on macOS; `netsh` on Windows.
+macOS, and Windows 11 from 24H2, hide the name from programs that lack
+location permission, and a terminal usually does; the network is then labeled
+`network-N` and works just the same. The name only picks the first label: two
+routers with the same name are two networks (`Home`, `Home-2`), and renaming
+is up to you.
 
 **Network changes.** The network is checked every ten seconds, so up to ten
 seconds of results after a move are still counted toward the previous network.

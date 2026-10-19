@@ -71,24 +71,30 @@ impl Resolver for Names {
     }
 }
 
-/// A network the test moves the machine on and off.
-struct Gateway(Mutex<Option<&'static str>>);
+/// A network the test moves the machine on and off: a gateway, and the
+/// Wi-Fi name the system reports alongside it.
+struct Gateway(Mutex<(Option<&'static str>, Option<&'static str>)>);
 
 impl Gateway {
     fn new(mac: Option<&'static str>) -> Arc<Self> {
-        Arc::new(Self(Mutex::new(mac)))
+        Arc::new(Self(Mutex::new((mac, None))))
     }
 
     fn set(&self, mac: Option<&'static str>) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = mac;
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).0 = mac;
+    }
+
+    fn set_ssid(&self, ssid: Option<&'static str>) {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).1 = ssid;
     }
 }
 
 impl NetworkDetector for Gateway {
     fn detect(&self) -> impl Future<Output = Option<Observed>> + Send {
-        let mac = *self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let (mac, ssid) = *self.0.lock().unwrap_or_else(PoisonError::into_inner);
         std::future::ready(mac.map(|mac| Observed {
             gateway_mac: mac.to_owned(),
+            ssid: ssid.map(str::to_owned),
         }))
     }
 }
@@ -591,6 +597,7 @@ async fn moving_to_another_network_starts_a_new_session_on_it() {
     let detected = |mac: &str| {
         Some(SessionNetwork::Detected(Observed {
             gateway_mac: mac.to_owned(),
+            ssid: None,
         }))
     };
     assert_eq!(announced, [detected(HOME), detected(CAFE)]);
@@ -670,4 +677,33 @@ async fn a_named_network_is_used_for_every_session_and_never_detected() {
     let networks = store.networks().expect("networks");
     assert_eq!(networks.len(), 1);
     assert_eq!(networks[0].gateway_mac, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wifi_name_names_a_new_network_but_its_change_alone_is_no_move() {
+    let harness = Harness::new();
+    harness.gateway.set_ssid(Some("Home"));
+    let gateway = Arc::clone(&harness.gateway);
+
+    let (result, _) = harness
+        .collect(&["192.0.2.1"], prompt(2 * SECOND), async {
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+            // The name drops out, as it does when the tool times out.
+            gateway.set_ssid(None);
+            tokio::time::sleep(Duration::from_secs(25)).await;
+        })
+        .await;
+
+    result.expect("clean stop");
+    let store = harness.store();
+    let sessions = store.sessions("192.0.2.1", EVERYTHING).expect("sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].network,
+        Some(
+            store
+                .network_by_label("Home")
+                .expect("labeled by its Wi-Fi name")
+        )
+    );
 }

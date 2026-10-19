@@ -33,6 +33,7 @@ const SETTINGS: SessionSettings = SessionSettings {
 fn detected(mac: &str) -> SessionNetwork {
     SessionNetwork::Detected(Observed {
         gateway_mac: mac.to_owned(),
+        ssid: None,
     })
 }
 
