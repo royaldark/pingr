@@ -485,12 +485,17 @@ where
     fn detected(&mut self, observed: Option<Observed>) {
         self.detecting = false;
         self.detect_at = Instant::now() + self.config.network_interval;
-        let Some(observed) = observed.map(SessionNetwork::Detected) else {
+        let Some(observed) = observed else {
             return;
         };
-        if self.network.as_ref() == Some(&observed) {
+        // The gateway alone says which network this is; a Wi-Fi name that
+        // comes and goes is no move.
+        if let Some(SessionNetwork::Detected(current)) = &self.network
+            && current.gateway_mac == observed.gateway_mac
+        {
             return;
         }
+        let observed = SessionNetwork::Detected(observed);
         let now = self.deps.wall.now();
         self.flush(now);
         self.end_session(now, EndReason::NetworkChanged);

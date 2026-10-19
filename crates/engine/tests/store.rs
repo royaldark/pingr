@@ -402,6 +402,7 @@ fn a_store_from_an_older_pingr_is_not_read_as_if_current() {
 fn detected(mac: &str) -> SessionNetwork {
     SessionNetwork::Detected(Observed {
         gateway_mac: mac.to_owned(),
+        ssid: None,
     })
 }
 
@@ -486,4 +487,32 @@ fn a_store_from_before_networks_is_upgraded_with_its_history_kept() {
     let samples = store.samples("example.com", EVERYTHING).expect("read");
     assert_eq!(samples.len(), 1);
     assert_eq!(samples[0].network, None);
+}
+
+#[test]
+fn a_wifi_network_is_labeled_with_its_name_and_a_namesake_gets_a_suffix() {
+    let (_dir, path) = scratch();
+    let (mut collecting, ..) = collecting(&path);
+    let wifi = |mac: &str| {
+        SessionNetwork::Detected(Observed {
+            gateway_mac: mac.to_owned(),
+            ssid: Some("Home".to_owned()),
+        })
+    };
+
+    let first = collecting
+        .network(&wifi("02:00:00:00:00:01"))
+        .expect("network");
+    // Another router broadcasting the same name, somewhere else.
+    let second = collecting
+        .network(&wifi("02:00:00:00:00:02"))
+        .expect("network");
+    let wired = collecting
+        .network(&detected("02:00:00:00:00:03"))
+        .expect("network");
+
+    let store = collecting.store();
+    assert_eq!(store.network_by_label("Home").expect("label"), first);
+    assert_eq!(store.network_by_label("Home-2").expect("label"), second);
+    assert_eq!(store.network_by_label("network-3").expect("label"), wired);
 }
