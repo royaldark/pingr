@@ -9,12 +9,12 @@ publish.workspace = true
 [dependencies]
 netdev = { version = "0.46.3", default-features = false, features = ["gateway"] }
 ping-async = "1.0.2"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 thiserror = "2.0.21"
 tokio = { version = "1.49.0", features = ["macros", "net", "rt", "sync", "time"] }
 
 [dev-dependencies]
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 tempfile = "3.27.0"
 tokio = { version = "1.49.0", features = ["test-util"] }
 
