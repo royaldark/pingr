@@ -54,7 +54,7 @@ jobs:
         run: |
           name="pingr-$TAG-${{ matrix.target }}"
           mkdir "$name"
-          cp README.md "$name/"
+          cp README.md LICENSE "$name/"
           if [ "$RUNNER_OS" = Windows ]; then
             cp "target/${{ matrix.target }}/release/pingr.exe" "$name/"
             archive="$name.zip"

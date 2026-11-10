@@ -186,3 +186,7 @@ mise run bench    # statistics over a month of one-second samples
 
 CI runs the tests on Linux, macOS, and Windows and the lint on Linux, for
 pull requests and for `main`.
+
+## License
+
+MIT; see [LICENSE](LICENSE).
